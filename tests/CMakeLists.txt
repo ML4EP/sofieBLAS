@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(AlpakaTest LANGUAGES CXX CUDA)
+project(AlpakaTest LANGUAGES CXX)
 
 # --- User-configurable options (override via -D) ---
 set(CUDA_BASE "/usr/local/cuda" CACHE PATH "CUDA base path")
@@ -8,7 +8,7 @@ set(ONEAPI_BASE "/opt/intel/oneapi" CACHE PATH "Intel oneAPI base path")
 set(TBB_BASE "/usr" CACHE PATH "TBB base path")
 set(ALPAKA_BASE "$ENV{HOME}/src/alpaka-group/alpaka" CACHE PATH "Alpaka base path")
 
-# Choose CPU BLAS library (default OpenBLAS)
+# --- CPU BLAS selection ---
 set(AVAILABLE_BLAS_LIBS OpenBLAS MKL CACHE STRING "Choose CPU BLAS library")
 set_property(CACHE AVAILABLE_BLAS_LIBS PROPERTY STRINGS OpenBLAS MKL)
 
@@ -17,19 +17,16 @@ if(NOT DEFINED CPU_BLAS_LIB)
 endif()
 
 # --- Compiler flags ---
-set(CXX_STANDARD 20)
-set(CXX_STANDARD_REQUIRED ON)
-
-set(CXXFLAGS "-O2;-g;-DALPAKA_HAS_STD_ATOMIC_REF")
-set(CXX_HOST_FLAGS "-fPIC;-pthread")
+set(CXXFLAGS -O2 -g -DALPAKA_HAS_STD_ATOMIC_REF)
+set(CXX_HOST_FLAGS -fPIC -pthread)
 set(CUDA_ARCH "sm_86")
-set(CXX_CUDA_FLAGS "-arch=${CUDA_ARCH};-Wno-deprecated-gpu-targets;--extended-lambda;--expt-relaxed-constexpr")
+set(CXX_CUDA_FLAGS -arch=${CUDA_ARCH} -Wno-deprecated-gpu-targets --extended-lambda --expt-relaxed-constexpr)
+set(XCOMPILER_FLAGS -Xcompiler=-fPIC,-pthread)
 
-# Include Alpaka headers and sofieBLAS includes
+# --- Include directories ---
 include_directories(${ALPAKA_BASE}/include "../sofieBLAS/include")
 
 # --- Functions to find BLAS libraries ---
-
 function(find_openblas blas_lib blas_define)
   find_path(OPENBLAS_PATH NAMES libopenblas.a
     PATHS /usr/lib/x86_64-linux-gnu/openblas-serial /usr/lib/x86_64-linux-gnu)
@@ -56,7 +53,6 @@ function(find_mkl blas_lib blas_define)
 endfunction()
 
 # --- BLAS detection and selection ---
-
 if(CPU_BLAS_LIB STREQUAL "OpenBLAS")
   find_openblas(BLAS_LIBS SOFIEBLAS_DEFINES)
   if(NOT BLAS_LIBS)
@@ -89,28 +85,25 @@ target_compile_definitions(test_cpu PRIVATE ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED $
 target_include_directories(test_cpu PRIVATE "../sofieBLAS/include" ${ALPAKA_BASE}/include)
 target_link_libraries(test_cpu PRIVATE ${BLAS_LIBS})
 
-# --- test_cuda target ---
-enable_language(CUDA)
 
-add_executable(test_cuda test.cc)
+set(TEST_SRC test.cc)
+
+add_executable(test_cuda)
+target_sources(test_cuda PRIVATE test.cc)
+set_source_files_properties(test.cc PROPERTIES LANGUAGE CUDA)
+enable_language(CUDA)
 set_target_properties(test_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_compile_features(test_cuda PUBLIC cxx_std_20)
 
 target_compile_options(test_cuda PRIVATE
-  $<$<COMPILE_LANGUAGE:CUDA>:${CXXFLAGS}>
-  $<$<COMPILE_LANGUAGE:CUDA>:${CXX_CUDA_FLAGS}>
-  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${CXX_HOST_FLAGS}>
+  ${CXXFLAGS}
+  ${CXX_CUDA_FLAGS}
+  ${XCOMPILER_FLAGS}
 )
 
 target_compile_definitions(test_cuda PRIVATE ALPAKA_ACC_GPU_CUDA_ENABLED)
-
-target_include_directories(test_cuda PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include")
-
-# CUDA include and lib paths
-target_include_directories(test_cuda PRIVATE ${CUDA_BASE}/include)
+target_include_directories(test_cuda PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include" ${CUDA_BASE}/include)
 target_link_directories(test_cuda PRIVATE ${CUDA_BASE}/lib64)
-
-# Link cuBLAS and CUDA runtime
 target_link_libraries(test_cuda PRIVATE cublas cudart)
 
 # --- clean target equivalent ---

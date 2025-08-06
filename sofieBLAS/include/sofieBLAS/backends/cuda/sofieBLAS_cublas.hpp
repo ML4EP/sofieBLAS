@@ -2,7 +2,7 @@
 
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
 
-#include "sofieBLAS/core.hpp"
+#    include "sofieBLAS/core.hpp"
 
 #    include <alpaka/alpaka.hpp>
 
@@ -29,25 +29,25 @@ public:
         CUBLAS_CHECK(cublasDestroy(m_handle));
     }
 
-    inline cublasOperation_t charToCuBlasTranspose(char trans) {
-    switch (trans) {
-        case 'N': case 'n': return CUBLAS_OP_N;
-        case 'T': case 't': return CUBLAS_OP_T;
-        case 'C': case 'c': return CUBLAS_OP_C;
-        default:
-            throw std::invalid_argument("Invalid transpose character for cuBLAS.");
-    }
+        inline cublasOperation_t charToCuBlasTranspose(char trans) {
+        switch (trans) {
+            case 'N': case 'n': return CUBLAS_OP_N;
+            case 'T': case 't': return CUBLAS_OP_T;
+            case 'C': case 'c': return CUBLAS_OP_C;
+            default:
+                throw std::invalid_argument("Invalid transpose character for cuBLAS.");
+        }
     }
 
     template<typename T, typename TIdx>
     inline void gemm(
         char transa, char transb,
-        int m, int n, int k,
-        const float* alpha,
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& A, int lda,
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& B, int ldb,
-        const float* beta,
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx>& C, int ldc)
+        const unsigned int m, const unsigned int n, const unsigned int k,
+        const float alpha,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& A, const int lda,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& B, const int ldb,
+        const float beta,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx>& C, const int ldc)
     {
         cublasOperation_t opA = charToCuBlasTranspose(transa);
         cublasOperation_t opB = charToCuBlasTranspose(transb);
@@ -56,15 +56,13 @@ public:
             m_handle,
             opA, opB,
             m, n, k,
-            alpha,
+            &alpha,
             A.data(), lda,
             B.data(), ldb,
-            beta,
+            &beta,
             C.data(), ldc
         ));
     }
-
-}
 
 private:
     alpaka::QueueCudaRtNonBlocking m_queue;

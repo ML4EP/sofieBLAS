@@ -2,6 +2,10 @@
     "files.associations": {
         "random": "cpp",
         "cmath": "cpp",
-        "format": "cpp"
+        "format": "cpp",
+        "array": "cpp",
+        "string": "cpp",
+        "string_view": "cpp",
+        "span": "cpp"
     }
 }
