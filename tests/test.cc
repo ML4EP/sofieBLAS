@@ -1,5 +1,5 @@
 #include <alpaka/alpaka.hpp>
-#include "blas/blas.hpp"
+#include "sofieBLAS/sofieBLAS.hpp"
 
 #include <iomanip>
 #include <iostream>
@@ -66,14 +66,33 @@ int main()
         alpaka::DevCudaRt device = alpaka::getDevByIdx(platform, 0u);
         alpaka::Queue<alpaka::DevCudaRt, alpaka::NonBlocking> queue{device};
 
+        const Idx m = size; // rows of A and C
+        const Idx n = size; // columns of B and C
+        const Idx k = size; // columns of A and rows of B
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        const Idx lda = size; // leading dimension of A
+        const Idx ldb = size; // leading dimension of B
+        const Idx ldc = size; 
+
         auto A_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
         auto B_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
         auto C_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
         alpaka::memcpy(queue, A_d, A);
         alpaka::memcpy(queue, B_d, B);
 
-        Blas<alpaka::TagGpuCudaRt> blas(queue);
-        blas.gemm(A_d, B_d, C_d, size);
+        sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);
+        blas.gemm(
+            'n', 'n',
+            m, n, k,
+            alpha,
+            A_d, lda,
+            B_d, ldb,
+            beta,
+            C_d, ldc
+        );
         alpaka::memcpy(queue, C, C_d);
 
         alpaka::wait(queue);
@@ -89,8 +108,27 @@ int main()
         alpaka::DevCpu device = alpaka::getDevByIdx(platform, 0u);
         alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{device};
 
-        Blas<alpaka::TagCpuSerial> blas(queue);
-        blas.gemm(A, B, C, size);
+        const Idx m = size; // rows of A and C
+        const Idx n = size; // columns of B and C
+        const Idx k = size; // columns of A and rows of B
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+
+        const Idx lda = size; // leading dimension of A
+        const Idx ldb = size; // leading dimension of B
+        const Idx ldc = size; // leading dimension of C
+
+        sofieBLAS<alpaka::TagCpuSerial> blas(queue);
+        blas.gemm(
+            'n', 'n',
+            m, n, k,
+            alpha,
+            A, lda,
+            B, ldb,
+            beta,
+            C, ldc
+        );
 
         alpaka::wait(queue);
         std::cout << "CPU Matrix C = A × B:\n";

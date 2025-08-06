@@ -2,20 +2,19 @@
 
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
 
-#    include "Blas.hpp"
+#include "sofieBLAS/core.hpp"
 
 #    include <alpaka/alpaka.hpp>
 
 #    include <cublas_v2.h>
 
-// Check for cuBLAS errors
 #    define CUBLAS_CHECK(err)                                                                                         \
         if(err != CUBLAS_STATUS_SUCCESS)                                                                              \
         {                                                                                                             \
             std::cerr << "cuBLAS Error at line " << __LINE__ << "\n";                                                 \
             exit(EXIT_FAILURE);                                                                                       \
         }
-
+        
 class BlasCuda
 {
 public:
@@ -30,38 +29,42 @@ public:
         CUBLAS_CHECK(cublasDestroy(m_handle));
     }
 
+    inline cublasOperation_t charToCuBlasTranspose(char trans) {
+    switch (trans) {
+        case 'N': case 'n': return CUBLAS_OP_N;
+        case 'T': case 't': return CUBLAS_OP_T;
+        case 'C': case 'c': return CUBLAS_OP_C;
+        default:
+            throw std::invalid_argument("Invalid transpose character for cuBLAS.");
+    }
+    }
+
     template<typename T, typename TIdx>
     inline void gemm(
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& A,
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& B,
-        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx>& C,
-        TIdx size)
+        char transa, char transb,
+        int m, int n, int k,
+        const float* alpha,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& A, int lda,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const& B, int ldb,
+        const float* beta,
+        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx>& C, int ldc)
     {
-        assert(alpaka::getExtentProduct(A) == size * size);
-        assert(alpaka::getExtentProduct(B) == size * size);
-        assert(alpaka::getExtentProduct(C) == size * size);
+        cublasOperation_t opA = charToCuBlasTranspose(transa);
+        cublasOperation_t opB = charToCuBlasTranspose(transb);
 
-        // Set alpha and beta for GEMM: C = alpha*A*B + beta*C
-        const T alpha = 1;
-        const T beta = 0;
-
-        // Perform C = A × B using cuBLAS (column-major)
         CUBLAS_CHECK(cublasSgemm(
             m_handle,
-            CUBLAS_OP_N, // Transpose A? No
-            CUBLAS_OP_N, // Transpose B? No
-            size, // m, n, k
-            size,
-            size,
-            &alpha, // alpha
-            A.data(), // A and its leading dimension
-            size,
-            B.data(), // B and its leading dimension
-            size,
-            &beta, // beta
-            C.data(), // C and its leading dimension
-            size));
+            opA, opB,
+            m, n, k,
+            alpha,
+            A.data(), lda,
+            B.data(), ldb,
+            beta,
+            C.data(), ldc
+        ));
     }
+
+}
 
 private:
     alpaka::QueueCudaRtNonBlocking m_queue;
@@ -72,7 +75,7 @@ namespace traits
 {
 
     template<>
-    class Blas<alpaka::TagGpuCudaRt>
+    class sofieBLAS<alpaka::TagGpuCudaRt>
     {
     public:
         using Impl = BlasCuda;
