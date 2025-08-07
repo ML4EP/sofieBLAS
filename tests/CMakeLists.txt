@@ -24,7 +24,7 @@ set(CXX_CUDA_FLAGS -arch=${CUDA_ARCH} -Wno-deprecated-gpu-targets --extended-lam
 set(XCOMPILER_FLAGS -Xcompiler=-fPIC,-pthread)
 
 # --- Include directories ---
-include_directories(${ALPAKA_BASE}/include "../sofieBLAS/include")
+include_directories(${ALPAKA_BASE}/include "../include")
 
 # --- Functions to find BLAS libraries ---
 function(find_openblas blas_lib blas_define)

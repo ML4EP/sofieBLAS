@@ -1,5 +1,5 @@
-#include <alpaka/alpaka.hpp>
 #include "sofieBLAS/sofieBLAS.hpp"
+#include <alpaka/alpaka.hpp>
 
 #include <iomanip>
 #include <iostream>
@@ -15,127 +15,107 @@ using Dim2D = alpaka::DimInt<2u>;
 using Dim3D = alpaka::DimInt<3u>;
 
 // Print a column-major matrix
-template<typename T, typename TIdx>
-void print(alpaka::BufCpu<T, Dim1D, TIdx> const& M, TIdx size)
-{
-    assert(alpaka::getExtentProduct(M) == size * size);
+template <typename T, typename TIdx>
+void print(alpaka::BufCpu<T, Dim1D, TIdx> const &M, TIdx size) {
+  assert(alpaka::getExtentProduct(M) == size * size);
 
-    for(TIdx row = 0; row < size; ++row)
-    {
-        for(TIdx col = 0; col < size; ++col)
-        {
-            std::cout << std::fixed << std::setprecision(2) << std::setw(7) << M[col * size + row] << " ";
-        }
-        std::cout << "\n";
+  for (TIdx row = 0; row < size; ++row) {
+    for (TIdx col = 0; col < size; ++col) {
+      std::cout << std::fixed << std::setprecision(2) << std::setw(7)
+                << M[col * size + row] << " ";
     }
+    std::cout << "\n";
+  }
 }
 
-int main()
-{
-    constexpr Idx size = 4;
+int main() {
+  constexpr Idx size = 4;
 
-    // Host platform and device
-    alpaka::PlatformCpu host_platform{};
-    auto host = alpaka::getDevByIdx(host_platform, 0u);
+  // Host platform and device
+  alpaka::PlatformCpu host_platform{};
+  auto host = alpaka::getDevByIdx(host_platform, 0u);
 
-    // Allocate matrices (column-major)
-    auto A = alpaka::allocBuf<float, Idx>(host, size * size);
-    auto B = alpaka::allocBuf<float, Idx>(host, size * size);
-    auto C = alpaka::allocBuf<float, Idx>(host, size * size);
+  // Allocate matrices (column-major)
+  auto A = alpaka::allocBuf<float, Idx>(host, size * size);
+  auto B = alpaka::allocBuf<float, Idx>(host, size * size);
+  auto C = alpaka::allocBuf<float, Idx>(host, size * size);
 
-    // Fill A and B with random floats centered around 0
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> dist(0.0f, 10.0f);
+  // Fill A and B with random floats centered around 0
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::normal_distribution<float> dist(0.0f, 10.0f);
 
-    for(int i = 0; i < size * size; ++i)
-    {
-        A[i] = dist(gen);
-        B[i] = dist(gen);
-    }
-    std::cout << "Matrix A:\n";
-    print(A, size);
-    std::cout << '\n';
-    std::cout << "Matrix B:\n";
-    print(B, size);
-    std::cout << '\n';
+  for (int i = 0; i < size * size; ++i) {
+    A[i] = dist(gen);
+    B[i] = dist(gen);
+  }
+  std::cout << "Matrix A:\n";
+  print(A, size);
+  std::cout << '\n';
+  std::cout << "Matrix B:\n";
+  print(B, size);
+  std::cout << '\n';
 
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
-    {
-        alpaka::PlatformCudaRt platform;
-        alpaka::DevCudaRt device = alpaka::getDevByIdx(platform, 0u);
-        alpaka::Queue<alpaka::DevCudaRt, alpaka::NonBlocking> queue{device};
+  {
+    alpaka::PlatformCudaRt platform;
+    alpaka::DevCudaRt device = alpaka::getDevByIdx(platform, 0u);
+    alpaka::Queue<alpaka::DevCudaRt, alpaka::NonBlocking> queue{device};
 
-        const Idx m = size; // rows of A and C
-        const Idx n = size; // columns of B and C
-        const Idx k = size; // columns of A and rows of B
+    const Idx m = size; // rows of A and C
+    const Idx n = size; // columns of B and C
+    const Idx k = size; // columns of A and rows of B
 
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
 
-        const Idx lda = size; // leading dimension of A
-        const Idx ldb = size; // leading dimension of B
-        const Idx ldc = size; 
+    const Idx lda = size; // leading dimension of A
+    const Idx ldb = size; // leading dimension of B
+    const Idx ldc = size;
 
-        auto A_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-        auto B_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-        auto C_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-        alpaka::memcpy(queue, A_d, A);
-        alpaka::memcpy(queue, B_d, B);
+    auto A_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
+    auto B_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
+    auto C_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
+    alpaka::memcpy(queue, A_d, A);
+    alpaka::memcpy(queue, B_d, B);
 
-        sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);
-        blas.gemm(
-            'n', 'n',
-            m, n, k,
-            alpha,
-            A_d, lda,
-            B_d, ldb,
-            beta,
-            C_d, ldc
-        );
-        alpaka::memcpy(queue, C, C_d);
+    sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);
+    blas.gemm('n', 'n', m, n, k, alpha, A_d, lda, B_d, ldb, beta, C_d, ldc);
+    alpaka::memcpy(queue, C, C_d);
 
-        alpaka::wait(queue);
-        std::cout << "CUDA Matrix C = A × B:\n";
-        print(C, size);
-        std::cout << '\n';
-    }
+    alpaka::wait(queue);
+    std::cout << "CUDA Matrix C = A × B:\n";
+    print(C, size);
+    std::cout << '\n';
+  }
 #endif
 
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
-    {
-        alpaka::PlatformCpu platform;
-        alpaka::DevCpu device = alpaka::getDevByIdx(platform, 0u);
-        alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{device};
+  {
+    alpaka::PlatformCpu platform;
+    alpaka::DevCpu device = alpaka::getDevByIdx(platform, 0u);
+    alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{device};
 
-        const Idx m = size; // rows of A and C
-        const Idx n = size; // columns of B and C
-        const Idx k = size; // columns of A and rows of B
+    const Idx m = size; // rows of A and C
+    const Idx n = size; // columns of B and C
+    const Idx k = size; // columns of A and rows of B
 
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
 
-        const Idx lda = size; // leading dimension of A
-        const Idx ldb = size; // leading dimension of B
-        const Idx ldc = size; // leading dimension of C
+    const Idx lda = size; // leading dimension of A
+    const Idx ldb = size; // leading dimension of B
+    const Idx ldc = size; // leading dimension of C
 
-        sofieBLAS<alpaka::TagCpuSerial> blas(queue);
-        blas.gemm(
-            'n', 'n',
-            m, n, k,
-            alpha,
-            A, lda,
-            B, ldb,
-            beta,
-            C, ldc
-        );
+    sofieBLAS<alpaka::TagCpuSerial> blas(queue);
+    blas.gemm('n', 'n', m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
 
-        alpaka::wait(queue);
-        std::cout << "CPU Matrix C = A × B:\n";
-        print(C, size);
-        std::cout << '\n';
-    }
+    alpaka::wait(queue);
+    std::cout << "CPU Matrix C = A × B:\n";
+    print(C, size);
+    std::cout << '\n';
+  }
 #endif
 
-    return 0;
+  return 0;
 }
