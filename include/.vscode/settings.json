@@ -1,8 +1,5 @@
 {
     "files.associations": {
-        "random": "cpp",
-        "cmath": "cpp",
-        "format": "cpp",
         "array": "cpp",
         "string": "cpp",
         "string_view": "cpp",
