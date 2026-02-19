@@ -64,6 +64,11 @@ class BlasCuda {
       LayoutStore;
 
 public:
+    BlasCuda(const BlasCuda&) = delete;
+    BlasCuda& operator=(const BlasCuda&) = delete;
+    BlasCuda(BlasCuda&&) = delete;
+    BlasCuda& operator=(BlasCuda&&) = delete;
+
   BlasCuda(alpaka::QueueCudaRtNonBlocking &queue) : m_queue{queue} {
     stream = static_cast<cudaStream_t>(m_queue.getNativeHandle());
     CHECK_CUBLAS(cublasLtCreate(&ltHandle));
