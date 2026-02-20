@@ -205,7 +205,7 @@ gemm(char transa, char transb, const unsigned int m,
 
 template <typename T, typename TIdx>
 inline void
-gemm(char transa, char transb, const unsigned int m,
+gemmrelu(char transa, char transb, const unsigned int m,
      const unsigned int n, const unsigned int k,
      const float alpha,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const &A,
