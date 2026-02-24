@@ -119,7 +119,7 @@ public:
   }
 
   void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k) {
-    CheckAndAddLayout(k, m); // A is k x m
+    CheckAndAddLayout(m, k); // A is m x k
     CheckAndAddLayout(k, n); // B is k x n
     CheckAndAddLayout(m, n); // C is m x n
   }
@@ -182,7 +182,7 @@ gemm(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{k, m}],
+        LayoutStore[{m, k}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
@@ -200,7 +200,7 @@ gemm(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{k, m}],
+        A.data(), LayoutStore[{m, k}],
         B.data(), LayoutStore[{k, n}],
         &beta,
         bias.data(), LayoutStore[{m, n}],
