@@ -84,6 +84,13 @@ public:
   }
 
   ~BlasCuda() {
+    for (auto& [key, layout] : LayoutStore) {
+      if (layout) {
+        cublasLtMatrixLayoutDestroy(layout);
+      }
+    }
+    LayoutStore.clear();
+
     if (preference)
       cublasLtMatmulPreferenceDestroy(preference);
     if (operationDesc)
@@ -92,6 +99,7 @@ public:
       cublasLtDestroy(ltHandle);
     if (d_workspace)
       cudaFree(d_workspace);
+    
   }
 
   inline cublasOperation_t charToCuBlasTranspose(char trans) {
