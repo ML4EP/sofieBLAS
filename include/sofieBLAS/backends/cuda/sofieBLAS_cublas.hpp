@@ -269,7 +269,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{k, m}],
+        LayoutStore[{m, k}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
@@ -287,7 +287,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{k, m}],
+        A.data(), LayoutStore[{m, k}],
         B.data(), LayoutStore[{k, n}],
         &beta,
         bias.data(), LayoutStore[{m, n}],
@@ -325,7 +325,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
 
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle, operationDesc, 
-        LayoutStore[{k, m}],            // Adesc (m x k)
+        LayoutStore[{m, k}],            // Adesc (m x k)
         LayoutStore[{k, n}],            // Bdesc (n x k)
         LayoutStore[{m, n}],            // Ddesc (m x 1)
         LayoutStore[{m, n}],            // Ddesc (m x n)
@@ -336,7 +336,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
-        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{k, m}],
+        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{m, k}],
         B.data(), LayoutStore[{k, n}], &beta, bias.data(), LayoutStore[{m, n}],
         C.data(), LayoutStore[{m, n}], &(heuristic.algo), d_workspace,
         workspaceSize, stream));
