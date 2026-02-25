@@ -121,7 +121,7 @@ public:
   void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k) {
     CheckAndAddLayout(m, k); // A is m x k
     CheckAndAddLayout(k, n); // B is k x n
-    CheckAndAddLayout(n, m); // C is n x m
+    CheckAndAddLayout(m, n); // C is m x n
   }
 
 template <typename T, typename TIdx>
@@ -182,10 +182,10 @@ gemm(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{n, k}],
-        LayoutStore[{k, m}],
-        LayoutStore[{n, m}],
-        LayoutStore[{n, m}],
+        LayoutStore[{m, k}],
+        LayoutStore[{k, n}],
+        LayoutStore[{m, n}],
+        LayoutStore[{m, n}],
         preference,
         1,
         &heuristic,
@@ -200,11 +200,11 @@ gemm(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{n, k}],
-        B.data(), LayoutStore[{k, m}],
+        A.data(), LayoutStore[{m, k}],
+        B.data(), LayoutStore[{k, n}],
         &beta,
-        bias.data(), LayoutStore[{n, m}],
-        C.data(), LayoutStore[{n, m}],
+        bias.data(), LayoutStore[{m, n}],
+        C.data(), LayoutStore[{m, n}],
         &(heuristic.algo),
         d_workspace,
         workspaceSize,
@@ -269,10 +269,10 @@ gemmrelu(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{n, k}],
-        LayoutStore[{k, m}],
-        LayoutStore[{n, m}],
-        LayoutStore[{n, m}],
+        LayoutStore[{m, k}],
+        LayoutStore[{k, n}],
+        LayoutStore[{m, n}],
+        LayoutStore[{m, n}],
         preference,
         1,
         &heuristic,
@@ -287,11 +287,11 @@ gemmrelu(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{n, k}],
-        B.data(), LayoutStore[{k, m}],
+        A.data(), LayoutStore[{m, k}],
+        B.data(), LayoutStore[{k, n}],
         &beta,
-        bias.data(), LayoutStore[{n, m}],
-        C.data(), LayoutStore[{n, m}],
+        bias.data(), LayoutStore[{m, n}],
+        C.data(), LayoutStore[{m, n }],
         &(heuristic.algo),
         d_workspace,
         workspaceSize,
@@ -325,10 +325,10 @@ gemmrelu(char transa, char transb, const unsigned int m,
 
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle, operationDesc, 
-        LayoutStore[{n, k}],            // Adesc (m x k)
-        LayoutStore[{k, m}],            // Bdesc (n x k)
-        LayoutStore[{n, m}],            // Ddesc (m x 1)
-        LayoutStore[{n, m}],            // Ddesc (m x n)
+        LayoutStore[{m, k}],            // Adesc (m x k)
+        LayoutStore[{k, n}],            // Bdesc (n x k)
+        LayoutStore[{m, n}],            // Ddesc (m x 1)
+        LayoutStore[{m, n}],            // Ddesc (m x n)
         preference, 1, &heuristic, &error_flag));
     if (error_flag == 0) {
       std::cerr << "No suitable cuBLASLt algorithm found!\n";
@@ -336,9 +336,9 @@ gemmrelu(char transa, char transb, const unsigned int m,
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
-        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{n, k}],
-        B.data(), LayoutStore[{k, m}], &beta, bias.data(), LayoutStore[{n, m}],
-        C.data(), LayoutStore[{n, m}], &(heuristic.algo), d_workspace,
+        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{m, k}],
+        B.data(), LayoutStore[{k, n}], &beta, bias.data(), LayoutStore[{m, n}],
+        C.data(), LayoutStore[{m, n}], &(heuristic.algo), d_workspace,
         workspaceSize, stream));
   }
 
