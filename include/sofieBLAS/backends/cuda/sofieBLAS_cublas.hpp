@@ -119,7 +119,7 @@ public:
   }
 
   void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k) {
-    CheckAndAddLayout(m, k); // A is m x k
+    CheckAndAddLayout(k, m); // A is m x k
     CheckAndAddLayout(k, n); // B is k x n
     CheckAndAddLayout(m, n); // C is m x n
   }
@@ -182,7 +182,7 @@ gemm(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{m, k}],
+        LayoutStore[{k, m}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
@@ -200,7 +200,7 @@ gemm(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{m, k}],
+        A.data(), LayoutStore[{k, m}],
         B.data(), LayoutStore[{k, n}],
         &beta,
         bias.data(), LayoutStore[{m, n}],
@@ -269,7 +269,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
         operationDesc,
-        LayoutStore[{m, k}],
+        LayoutStore[{k, m}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
@@ -287,7 +287,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
         ltHandle,
         operationDesc,
         &alpha,
-        A.data(), LayoutStore[{m, k}],
+        A.data(), LayoutStore[{k, m}],
         B.data(), LayoutStore[{k, n}],
         &beta,
         bias.data(), LayoutStore[{m, n}],
@@ -325,7 +325,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
 
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle, operationDesc, 
-        LayoutStore[{m, k}],            // Adesc (m x k)
+        LayoutStore[{k, m}],            // Adesc (m x k)
         LayoutStore[{k, n}],            // Bdesc (n x k)
         LayoutStore[{m, n}],            // Ddesc (m x 1)
         LayoutStore[{m, n}],            // Ddesc (m x n)
@@ -336,7 +336,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
-        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{m, k}],
+        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{k, m}],
         B.data(), LayoutStore[{k, n}], &beta, bias.data(), LayoutStore[{m, n}],
         C.data(), LayoutStore[{m, n}], &(heuristic.algo), d_workspace,
         workspaceSize, stream));
