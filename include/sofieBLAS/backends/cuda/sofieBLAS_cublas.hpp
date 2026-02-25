@@ -135,80 +135,59 @@ gemm(char transa, char transb, const unsigned int m,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
 {
-    // Destroy old descriptor if exists
-    if (operationDesc)
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+    // Create a LOCAL descriptor — don't touch the shared member
+    cublasLtMatmulDesc_t localDesc = nullptr;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    // Create fresh descriptor
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc,
-                                          CUBLAS_COMPUTE_32F,
-                                          CUDA_R_32F));
-
-    // Set transpose
-    cublasOperation_t transB = charToCuBlasTranspose(transb);
+    cublasOperation_t transB_op = charToCuBlasTranspose(transb);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSB,
-        &transB,
-        sizeof(transB)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB_op, sizeof(transB_op)));
 
-    cublasOperation_t transA = charToCuBlasTranspose(transa);
+    cublasOperation_t transA_op = charToCuBlasTranspose(transa);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSA,
-        &transA,
-        sizeof(transA)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA_op, sizeof(transA_op)));
 
-    // Set bias pointer
-    void *bias_ptr = reinterpret_cast<void *>(bias.data());
+    void *bias_ptr = reinterpret_cast<void *>(alpaka::getPtrNative(bias));
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-        &bias_ptr,
-        sizeof(bias_ptr)));
+        localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
 
-    // Set epilogue
-    cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_BIAS;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_EPILOGUE,
-        &ep,
-        sizeof(ep)));
-
-    // Local heuristic
-    cublasLtMatmulHeuristicResult_t heuristic{};
+    cublasLtMatmulHeuristicResult_t localHeuristic{};
     int returnedResults = 0;
-
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
-        operationDesc,
+        localDesc,
         LayoutStore[{k, m}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
         preference,
         1,
-        &heuristic,
+        &localHeuristic,
         &returnedResults));
 
     if (returnedResults == 0) {
+        cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
         exit(EXIT_FAILURE);
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
         ltHandle,
-        operationDesc,
+        localDesc,
         &alpha,
-        A.data(), LayoutStore[{k, m}],
-        B.data(), LayoutStore[{k, n}],
+        alpaka::getPtrNative(A), LayoutStore[{k, m}],
+        alpaka::getPtrNative(B), LayoutStore[{k, n}],
         &beta,
-        bias.data(), LayoutStore[{m, n}],
-        C.data(), LayoutStore[{m, n}],
-        &(heuristic.algo),
+        alpaka::getPtrNative(bias), LayoutStore[{m, n}],
+        alpaka::getPtrNative(C),    LayoutStore[{m, n}],
+        &(localHeuristic.algo),
         d_workspace,
         workspaceSize,
         stream));
+
+    // Safe to destroy AFTER submitting to stream — the handle is host-side,
+    // the algo selection is already baked into the submitted work
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
 }
 
 template <typename T, typename TIdx>
@@ -222,80 +201,63 @@ gemmrelu(char transa, char transb, const unsigned int m,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
 {
-    // Destroy old descriptor if exists
-    if (operationDesc)
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+    // Create a LOCAL descriptor — don't touch the shared member
+    cublasLtMatmulDesc_t localDesc = nullptr;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    // Create fresh descriptor
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc,
-                                          CUBLAS_COMPUTE_32F,
-                                          CUDA_R_32F));
-
-    // Set transpose
-    cublasOperation_t transB = charToCuBlasTranspose(transb);
+    cublasOperation_t transB_op = charToCuBlasTranspose(transb);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSB,
-        &transB,
-        sizeof(transB)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB_op, sizeof(transB_op)));
 
-    cublasOperation_t transA = charToCuBlasTranspose(transa);
+    cublasOperation_t transA_op = charToCuBlasTranspose(transa);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSA,
-        &transA,
-        sizeof(transA)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA_op, sizeof(transA_op)));
 
-    // Set bias pointer
-    void *bias_ptr = reinterpret_cast<void *>(bias.data());
+    void *bias_ptr = reinterpret_cast<void *>(alpaka::getPtrNative(bias));
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-        &bias_ptr,
-        sizeof(bias_ptr)));
+        localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
 
-    // Set epilogue
     cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_RELU_BIAS;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_EPILOGUE,
-        &ep,
-        sizeof(ep)));
-        
-    // Local heuristic
-    cublasLtMatmulHeuristicResult_t heuristic{};
-    int returnedResults = 0;
+        localDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof(ep)));
 
+    cublasLtMatmulHeuristicResult_t localHeuristic{};
+    int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
-        operationDesc,
+        localDesc,
         LayoutStore[{k, m}],
         LayoutStore[{k, n}],
         LayoutStore[{m, n}],
         LayoutStore[{m, n}],
         preference,
         1,
-        &heuristic,
+        &localHeuristic,
         &returnedResults));
 
     if (returnedResults == 0) {
+        cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
         exit(EXIT_FAILURE);
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
         ltHandle,
-        operationDesc,
+        localDesc,
         &alpha,
-        A.data(), LayoutStore[{k, m}],
-        B.data(), LayoutStore[{k, n}],
+        alpaka::getPtrNative(A), LayoutStore[{k, m}],
+        alpaka::getPtrNative(B), LayoutStore[{k, n}],
         &beta,
-        bias.data(), LayoutStore[{m, n}],
-        C.data(), LayoutStore[{m, n }],
-        &(heuristic.algo),
+        alpaka::getPtrNative(bias), LayoutStore[{m, n}],
+        alpaka::getPtrNative(C),    LayoutStore[{m, n}],
+        &(localHeuristic.algo),
         d_workspace,
         workspaceSize,
         stream));
+
+    // Safe to destroy AFTER submitting to stream — the handle is host-side,
+    // the algo selection is already baked into the submitted work
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
 }
 
   template <typename T, typename TIdx>
