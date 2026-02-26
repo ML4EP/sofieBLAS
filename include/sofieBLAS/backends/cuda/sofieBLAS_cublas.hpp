@@ -193,6 +193,8 @@ gemm(char transa, char transb, const unsigned int m,
         workspaceSize,
         stream));
 
+      cudaDeviceSynchronize();
+
     // Safe to destroy AFTER submitting to stream — the handle is host-side,
     // the algo selection is already baked into the submitted work
     CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
@@ -262,6 +264,8 @@ gemmrelu(char transa, char transb, const unsigned int m,
         d_workspace,
         workspaceSize,
         stream));
+
+              cudaDeviceSynchronize();
 
     // Safe to destroy AFTER submitting to stream — the handle is host-side,
     // the algo selection is already baked into the submitted work
