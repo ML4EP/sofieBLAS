@@ -122,6 +122,7 @@ public:
     CheckAndAddLayout(k, m); // A is m x k
     CheckAndAddLayout(k, n); // B is k x n
     CheckAndAddLayout(m, n); // C is m x n
+    CheckAndAddLayout(m, 1);
   }
 
 template <typename T, typename TIdx>
@@ -166,7 +167,7 @@ gemm(char transa, char transb, const unsigned int m,
         localDesc,
         LayoutStore[{k, m}],
         LayoutStore[{k, n}],
-        LayoutStore[{m, n}],
+        LayoutStore[{m, 1}],
         LayoutStore[{m, n}],
         preference,
         1,
@@ -186,7 +187,7 @@ gemm(char transa, char transb, const unsigned int m,
         alpaka::getPtrNative(A), LayoutStore[{k, m}],
         alpaka::getPtrNative(B), LayoutStore[{k, n}],
         &beta,
-        alpaka::getPtrNative(bias), LayoutStore[{m, n}],
+        alpaka::getPtrNative(bias), LayoutStore[{m, 1}],
         alpaka::getPtrNative(C),    LayoutStore[{m, n}],
         &(localHeuristic.algo),
         d_workspace,
@@ -238,7 +239,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
         localDesc,
         LayoutStore[{k, m}],
         LayoutStore[{k, n}],
-        LayoutStore[{m, n}],
+        LayoutStore[{m, 1}],
         LayoutStore[{m, n}],
         preference,
         1,
@@ -258,7 +259,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
         alpaka::getPtrNative(A), LayoutStore[{k, m}],
         alpaka::getPtrNative(B), LayoutStore[{k, n}],
         &beta,
-        alpaka::getPtrNative(bias), LayoutStore[{m, n}],
+        alpaka::getPtrNative(bias), LayoutStore[{m, 1}],
         alpaka::getPtrNative(C),    LayoutStore[{m, n}],
         &(localHeuristic.algo),
         d_workspace,
