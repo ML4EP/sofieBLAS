@@ -151,6 +151,14 @@ gemm(char transa, char transb, const unsigned int m,
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
         localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
 
+    cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_BIAS;
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        localDesc,
+        CUBLASLT_MATMUL_DESC_EPILOGUE,
+        &ep,
+        sizeof(ep)));
+
+
     cublasLtMatmulHeuristicResult_t localHeuristic{};
     int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
