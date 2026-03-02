@@ -118,10 +118,10 @@ public:
     }
   }
 
-  void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k) {
-    CheckAndAddLayout(k, m);
-    CheckAndAddLayout(k, n);
-    CheckAndAddLayout(m, n);
+  void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t lda, std::size_t ldb, std::size_t ldc) {
+    CheckAndAddLayout(k, m, lda);
+    CheckAndAddLayout(k, n, ldb);
+    CheckAndAddLayout(m, n, ldc);
   }
 
 template <typename T, typename TIdx>
@@ -313,11 +313,10 @@ gemmrelu(char transa, char transb, const unsigned int m,
 private:
   alpaka::QueueCudaRtNonBlocking m_queue;
 
-  void CheckAndAddLayout(size_t rows, size_t cols) {
+  void CheckAndAddLayout(size_t rows, size_t cols, size_t ld) {
     auto key = std::make_pair(rows, cols);
     if (LayoutStore.find(key) == LayoutStore.end()) {
       cublasLtMatrixLayout_t temp = nullptr;
-      size_t ld = rows;
       CHECK_CUBLAS(
           cublasLtMatrixLayoutCreate(&temp, CUDA_R_32F, rows, cols, ld));
       LayoutStore.emplace(key, temp);
