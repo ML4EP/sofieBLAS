@@ -319,6 +319,8 @@ private:
       cublasLtMatrixLayout_t temp = nullptr;
       CHECK_CUBLAS(
           cublasLtMatrixLayoutCreate(&temp, CUDA_R_32F, rows, cols, ld));
+      cublasLtMatrixLayoutSetAttribute(
+          temp, CUBLASLT_MATRIX_LAYOUT_ORDER, CUBLASLT_ORDER_COL, sizeof(int));
       LayoutStore.emplace(key, temp);
     }
   }
