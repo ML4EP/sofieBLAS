@@ -119,9 +119,9 @@ public:
   }
 
   void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k) {
-    CheckAndAddLayout(m, k); // A is m x k
-    CheckAndAddLayout(k, n); // B is k x n
-    CheckAndAddLayout(m, n); // C is m x n
+    CheckAndAddLayout(k, m);
+    CheckAndAddLayout(k, n);
+    CheckAndAddLayout(m, n);
   }
 
 template <typename T, typename TIdx>
@@ -135,80 +135,65 @@ gemm(char transa, char transb, const unsigned int m,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
 {
-    // Destroy old descriptor if exists
-    if (operationDesc)
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+    cublasLtMatmulDesc_t localDesc = nullptr;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    // Create fresh descriptor
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc,
-                                          CUBLAS_COMPUTE_32F,
-                                          CUDA_R_32F));
-
-    // Set transpose
-    cublasOperation_t transB = charToCuBlasTranspose(transb);
+    cublasOperation_t transB_op = charToCuBlasTranspose(transb);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSB,
-        &transB,
-        sizeof(transB)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB_op, sizeof(transB_op)));
 
-    cublasOperation_t transA = charToCuBlasTranspose(transa);
+    cublasOperation_t transA_op = charToCuBlasTranspose(transa);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSA,
-        &transA,
-        sizeof(transA)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA_op, sizeof(transA_op)));
 
-    // Set bias pointer
-    void *bias_ptr = reinterpret_cast<void *>(bias.data());
+    void *bias_ptr = reinterpret_cast<void *>(alpaka::getPtrNative(bias));
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-        &bias_ptr,
-        sizeof(bias_ptr)));
+        localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
 
-    // Set epilogue
     cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_BIAS;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
+        localDesc,
         CUBLASLT_MATMUL_DESC_EPILOGUE,
         &ep,
         sizeof(ep)));
 
-    // Local heuristic
-    cublasLtMatmulHeuristicResult_t heuristic{};
-    int returnedResults = 0;
 
+    cublasLtMatmulHeuristicResult_t localHeuristic{};
+    int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
-        operationDesc,
-        LayoutStore[{m, k}],
-        LayoutStore[{k, n}],
-        LayoutStore[{m, n}],
-        LayoutStore[{m, n}],
+        localDesc,
+        LayoutStore.at({k, m}),
+        LayoutStore.at({k, n}),
+        LayoutStore.at({m, n}),
+        LayoutStore.at({m, n}),
         preference,
         1,
-        &heuristic,
+        &localHeuristic,
         &returnedResults));
 
     if (returnedResults == 0) {
+        cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
         exit(EXIT_FAILURE);
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
         ltHandle,
-        operationDesc,
+        localDesc,
         &alpha,
-        A.data(), LayoutStore[{m, k}],
-        B.data(), LayoutStore[{k, n}],
+        alpaka::getPtrNative(A), LayoutStore.at({k, m}),
+        alpaka::getPtrNative(B), LayoutStore.at({k, n}),
         &beta,
-        bias.data(), LayoutStore[{m, n}],
-        C.data(), LayoutStore[{m, n}],
-        &(heuristic.algo),
+        alpaka::getPtrNative(bias), LayoutStore.at({m, n}),
+        alpaka::getPtrNative(C),    LayoutStore.at({m, n}),
+        &(localHeuristic.algo),
         d_workspace,
         workspaceSize,
         stream));
+
+    cudaDeviceSynchronize();
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
 }
 
 template <typename T, typename TIdx>
@@ -222,80 +207,60 @@ gemmrelu(char transa, char transb, const unsigned int m,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
 {
-    // Destroy old descriptor if exists
-    if (operationDesc)
-        CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
+    cublasLtMatmulDesc_t localDesc = nullptr;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
-    // Create fresh descriptor
-    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc,
-                                          CUBLAS_COMPUTE_32F,
-                                          CUDA_R_32F));
-
-    // Set transpose
-    cublasOperation_t transB = charToCuBlasTranspose(transb);
+    cublasOperation_t transB_op = charToCuBlasTranspose(transb);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSB,
-        &transB,
-        sizeof(transB)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB_op, sizeof(transB_op)));
 
-    cublasOperation_t transA = charToCuBlasTranspose(transa);
+    cublasOperation_t transA_op = charToCuBlasTranspose(transa);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_TRANSA,
-        &transA,
-        sizeof(transA)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA_op, sizeof(transA_op)));
 
-    // Set bias pointer
-    void *bias_ptr = reinterpret_cast<void *>(bias.data());
+    void *bias_ptr = reinterpret_cast<void *>(alpaka::getPtrNative(bias));
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-        &bias_ptr,
-        sizeof(bias_ptr)));
+        localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr, sizeof(bias_ptr)));
 
-    // Set epilogue
     cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_RELU_BIAS;
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc,
-        CUBLASLT_MATMUL_DESC_EPILOGUE,
-        &ep,
-        sizeof(ep)));
-        
-    // Local heuristic
-    cublasLtMatmulHeuristicResult_t heuristic{};
-    int returnedResults = 0;
+        localDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof(ep)));
 
+    cublasLtMatmulHeuristicResult_t localHeuristic{};
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
-        operationDesc,
-        LayoutStore[{k, m}],
-        LayoutStore[{k, n}],
-        LayoutStore[{m, n}],
-        LayoutStore[{m, n}],
+        localDesc,
+        LayoutStore.at({k, m}),
+        LayoutStore.at({k, n}),
+        LayoutStore.at({m, n}),
+        LayoutStore.at({m, n}),
         preference,
         1,
-        &heuristic,
-        &returnedResults));
+        &localHeuristic,
+        &error_flag));
 
-    if (returnedResults == 0) {
+    if (error_flag == 0) {
+        cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
         exit(EXIT_FAILURE);
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
         ltHandle,
-        operationDesc,
+        localDesc,
         &alpha,
-        A.data(), LayoutStore[{k, m}],
-        B.data(), LayoutStore[{k, n}],
+        alpaka::getPtrNative(A), LayoutStore.at({k, m}),
+        alpaka::getPtrNative(B), LayoutStore.at({k, n}),
         &beta,
-        bias.data(), LayoutStore[{m, n}],
-        C.data(), LayoutStore[{m, n}],
-        &(heuristic.algo),
+        alpaka::getPtrNative(bias), LayoutStore.at({m, n}),
+        alpaka::getPtrNative(C),    LayoutStore.at({m, n}),
+        &(localHeuristic.algo),
         d_workspace,
         workspaceSize,
         stream));
+
+    cudaDeviceSynchronize();
+    CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
 }
 
   template <typename T, typename TIdx>
@@ -308,37 +273,40 @@ gemmrelu(char transa, char transb, const unsigned int m,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
 
-    void *bias_ptr = reinterpret_cast<void *>(bias.data());
+    cublasLtMatmulDesc_t localDesc = nullptr;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    
+    void *bias_ptr = reinterpret_cast<void *>(alpaka::getPtrNative(bias));
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr,
+        localDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr,
         sizeof(bias_ptr)));
 
     cublasOperation_t transB = charToCuBlasTranspose(transb);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)));
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)));
 
     cublasOperation_t transA = charToCuBlasTranspose(transa);
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)));
-
+        localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)));
     SetGeluActivation();
 
+    cublasLtMatmulHeuristicResult_t localHeuristic{};
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
-        ltHandle, operationDesc, 
-        LayoutStore[{k, m}],            // Adesc (m x k)
-        LayoutStore[{k, n}],            // Bdesc (n x k)
-        LayoutStore[{m, n}],            // Ddesc (m x 1)
-        LayoutStore[{m, n}],            // Ddesc (m x n)
-        preference, 1, &heuristic, &error_flag));
+        ltHandle, localDesc, 
+        LayoutStore.at({k, m}),
+        LayoutStore.at({k, n}),
+        LayoutStore.at({m, n}),
+        LayoutStore.at({m, n}),
+        preference, 1, &localHeuristic, &error_flag));
     if (error_flag == 0) {
       std::cerr << "No suitable cuBLASLt algorithm found!\n";
       exit(EXIT_FAILURE);
     }
 
     CHECK_CUBLAS(cublasLtMatmul(
-        ltHandle, operationDesc, &alpha, A.data(), LayoutStore[{k, m}],
-        B.data(), LayoutStore[{k, n}], &beta, bias.data(), LayoutStore[{m, n}],
-        C.data(), LayoutStore[{m, n}], &(heuristic.algo), d_workspace,
+        ltHandle, localDesc, &alpha, alpaka::getPtrNative(A), LayoutStore.at({k, m}),
+        alpaka::getPtrNative(B), LayoutStore.at({k, n}), &beta, alpaka::getPtrNative(bias), LayoutStore.at({m, n}),
+        alpaka::getPtrNative(C), LayoutStore.at({m, n}), &(localHeuristic.algo), d_workspace,
         workspaceSize, stream));
   }
 
