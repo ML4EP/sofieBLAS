@@ -49,7 +49,6 @@ struct PairEq {
 
 class BlasCuda {
   cublasLtHandle_t ltHandle = nullptr;
-  cublasHandle_t handle = nullptr;
   cublasLtMatmulDesc_t operationDesc = nullptr;
   cublasLtMatmulPreference_t preference = nullptr;
   void *d_workspace = nullptr;
@@ -72,7 +71,7 @@ public:
   BlasCuda(alpaka::QueueCudaRtNonBlocking &queue) : m_queue{queue} {
     stream = static_cast<cudaStream_t>(m_queue.getNativeHandle());
     CHECK_CUBLAS(cublasLtCreate(&ltHandle));
-    CHECK_CUBLAS(cublasCreate(&handle));
+    CHECK_CUBLAS(cublasSetStream(ltHandle, stream));
     heuristic = {};
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F,
                                           CUDA_R_32F));
