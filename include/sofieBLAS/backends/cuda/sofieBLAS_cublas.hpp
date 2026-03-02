@@ -71,7 +71,6 @@ public:
   BlasCuda(alpaka::QueueCudaRtNonBlocking &queue) : m_queue{queue} {
     stream = static_cast<cudaStream_t>(m_queue.getNativeHandle());
     CHECK_CUBLAS(cublasLtCreate(&ltHandle));
-    CHECK_CUBLAS(cublasSetStream(ltHandle, stream));
     heuristic = {};
     CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F,
                                           CUDA_R_32F));
@@ -170,7 +169,8 @@ gemm(char transa, char transb, const unsigned int m,
         1,
         &localHeuristic,
         &returnedResults));
-
+    std::cout << "Requested workspace: "
+          << localHeuristic.workspaceSize << std::endl;
     if (returnedResults == 0) {
         cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
@@ -237,7 +237,8 @@ gemmrelu(char transa, char transb, const unsigned int m,
         1,
         &localHeuristic,
         &error_flag));
-
+        std::cout << "Requested workspace: "
+                  << localHeuristic.workspaceSize << std::endl;
     if (error_flag == 0) {
         cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
