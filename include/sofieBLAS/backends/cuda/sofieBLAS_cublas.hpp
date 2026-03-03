@@ -169,8 +169,6 @@ gemm(char transa, char transb, const unsigned int m,
         1,
         &localHeuristic,
         &returnedResults));
-    std::cout << "Requested workspace: "
-          << localHeuristic.workspaceSize << std::endl;
     if (returnedResults == 0) {
         cublasLtMatmulDescDestroy(localDesc);
         std::cerr << "No suitable cuBLASLt algorithm found!\n";
