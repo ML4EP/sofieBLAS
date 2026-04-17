@@ -322,21 +322,21 @@ gemmrelu(char transa, char transb, const unsigned int m,
   {
 
     matmul(transa, transb, m, n, k, alpha,
-           reinterpret_cast<void *>(alpaka::getPtrNative(A)),
-           reinterpret_cast<void *>(alpaka::getPtrNative(B)),
+           alpaka::getPtrNative(A),
+           alpaka::getPtrNative(B),
            beta,
-           reinterpret_cast<void *>(alpaka::getPtrNative(C)));
+           alpaka::getPtrNative(C));
   }
-  
+
   template <typename T, typename TIdx>
   inline void
   matmul(char transa, char transb, const unsigned int m,
       const unsigned int n, const unsigned int k,
       const float alpha,
-      void const &A,
-      void const &B,
+      void const * A,
+      void const * B,
       const float beta,
-      void &C)
+      void * C)
   {
       cublasLtMatmulDesc_t localDesc = nullptr;
       CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
