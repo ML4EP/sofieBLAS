@@ -308,6 +308,66 @@ gemmrelu(char transa, char transb, const unsigned int m,
         workspaceSize, stream));
   }
 
+  // matmul without bias
+  template <typename T, typename TIdx>
+  inline void
+  matmul(char transa, char transb, const unsigned int m,
+      const unsigned int n, const unsigned int k,
+      const float alpha,
+      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const &A,
+      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const &B,
+      const float beta,
+      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
+  {
+      cublasLtMatmulDesc_t localDesc = nullptr;
+      CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+
+      cublasOperation_t transB_op = charToCuBlasTranspose(transb);
+      CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+          localDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB_op, sizeof(transB_op)));
+
+      cublasOperation_t transA_op = charToCuBlasTranspose(transa);
+      CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+          localDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA_op, sizeof(transA_op)));
+
+
+      cublasLtMatmulHeuristicResult_t localHeuristic{};
+      int returnedResults = 0;
+      CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
+          ltHandle,
+          localDesc,
+          LayoutStore.at({k, m}),
+          LayoutStore.at({k, n}),
+          LayoutStore.at({m, n}),
+          LayoutStore.at({m, n}),
+          preference,
+          1,
+          &localHeuristic,
+          &returnedResults));
+      if (returnedResults == 0) {
+          cublasLtMatmulDescDestroy(localDesc);
+          std::cerr << "No suitable cuBLASLt algorithm found!\n";
+          exit(EXIT_FAILURE);
+      }
+
+      CHECK_CUBLAS(cublasLtMatmul(
+          ltHandle,
+          localDesc,
+          &alpha,
+          alpaka::getPtrNative(A), LayoutStore.at({k, m}),
+          alpaka::getPtrNative(B), LayoutStore.at({k, n}),
+          &beta,
+          alpaka::getPtrNative(C), LayoutStore.at({m, n}),
+          alpaka::getPtrNative(C),    LayoutStore.at({m, n}),
+          &(localHeuristic.algo),
+          d_workspace,
+          workspaceSize,
+          stream));
+
+      cudaDeviceSynchronize();
+      CHECK_CUBLAS(cublasLtMatmulDescDestroy(localDesc));
+  }
+
 private:
   alpaka::QueueCudaRtNonBlocking m_queue;
 
