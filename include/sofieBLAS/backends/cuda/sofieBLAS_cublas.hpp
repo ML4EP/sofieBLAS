@@ -308,6 +308,7 @@ gemmrelu(char transa, char transb, const unsigned int m,
         workspaceSize, stream));
   }
 
+  
   // matmul without bias
   template <typename T, typename TIdx>
   inline void
@@ -318,6 +319,24 @@ gemmrelu(char transa, char transb, const unsigned int m,
       alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> const &B,
       const float beta,
       alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C)
+  {
+
+    matmul(transa, transb, m, n, k, alpha,
+           reinterpret_cast<void *>(alpaka::getPtrNative(A)),
+           reinterpret_cast<void *>(alpaka::getPtrNative(B)),
+           beta,
+           reinterpret_cast<void *>(alpaka::getPtrNative(C)));
+  }
+  
+  template <typename T, typename TIdx>
+  inline void
+  matmul(char transa, char transb, const unsigned int m,
+      const unsigned int n, const unsigned int k,
+      const float alpha,
+      void const &A,
+      void const &B,
+      const float beta,
+      void &C)
   {
       cublasLtMatmulDesc_t localDesc = nullptr;
       CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
@@ -354,11 +373,11 @@ gemmrelu(char transa, char transb, const unsigned int m,
           ltHandle,
           localDesc,
           &alpha,
-          alpaka::getPtrNative(A), LayoutStore.at({k, m}),
-          alpaka::getPtrNative(B), LayoutStore.at({k, n}),
+          A, LayoutStore.at({k, m}),
+          B, LayoutStore.at({k, n}),
           &beta,
-          alpaka::getPtrNative(C), LayoutStore.at({m, n}),
-          alpaka::getPtrNative(C),    LayoutStore.at({m, n}),
+          C, LayoutStore.at({m, n}),
+          C, LayoutStore.at({m, n}),
           &(localHeuristic.algo),
           d_workspace,
           workspaceSize,
