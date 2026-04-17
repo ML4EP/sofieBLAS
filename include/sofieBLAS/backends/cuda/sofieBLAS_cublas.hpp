@@ -328,7 +328,6 @@ gemmrelu(char transa, char transb, const unsigned int m,
            alpaka::getPtrNative(C));
   }
 
-  template <typename T, typename TIdx>
   inline void
   matmul(char transa, char transb, const unsigned int m,
       const unsigned int n, const unsigned int k,
