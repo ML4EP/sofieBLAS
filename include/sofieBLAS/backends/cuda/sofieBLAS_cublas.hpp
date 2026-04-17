@@ -333,10 +333,10 @@ gemmrelu(char transa, char transb, const unsigned int m,
   matmul(char transa, char transb, const unsigned int m,
       const unsigned int n, const unsigned int k,
       const float alpha,
-      void const * A,
-      void const * B,
+      T const * A,
+      T const * B,
       const float beta,
-      void * C)
+      T * C)
   {
       cublasLtMatmulDesc_t localDesc = nullptr;
       CHECK_CUBLAS(cublasLtMatmulDescCreate(&localDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
