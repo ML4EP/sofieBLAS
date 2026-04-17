@@ -117,7 +117,7 @@ public:
   }
 
   void AddLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t lda, std::size_t ldb, std::size_t ldc) {
-    CheckAndAddLayout(k, m, lda);
+    CheckAndAddLayout(m, k, lda);
     CheckAndAddLayout(k, n, ldb);
     CheckAndAddLayout(m, n, ldc);
   }
