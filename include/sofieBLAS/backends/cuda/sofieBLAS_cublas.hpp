@@ -195,8 +195,8 @@ public:
   // correct leading dims and layout)
   template <typename T>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
-                     unsigned int k, float alpha, T const &A, T const &B,
-                     float beta, T &C) {
+                     unsigned int k, float alpha, T const * A, T const * B,
+                     float beta, T * C) {
     auto desc =
         makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
                  CUBLASLT_EPILOGUE_DEFAULT);
