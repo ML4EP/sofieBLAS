@@ -193,7 +193,7 @@ public:
 
   // matmul on raw pointers directly (no layout caching, caller must ensure
   // correct leading dims and layout)
-  template <typename T, typename TIdx>
+  template <typename T>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, T const &A, T const &B,
                      float beta, T &C) {
