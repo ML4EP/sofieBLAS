@@ -19,9 +19,14 @@ endif()
 # --- Compiler flags ---
 set(CXXFLAGS -O2 -g -DALPAKA_HAS_STD_ATOMIC_REF)
 set(CXX_HOST_FLAGS -fPIC -pthread)
-set(CUDA_ARCH "sm_86")
-set(CXX_CUDA_FLAGS -arch=${CUDA_ARCH} -Wno-deprecated-gpu-targets --extended-lambda --expt-relaxed-constexpr)
+set(CXX_CUDA_FLAGS -Wno-deprecated-gpu-targets --extended-lambda --expt-relaxed-constexpr)
 set(XCOMPILER_FLAGS -Xcompiler=-fPIC,-pthread)
+
+# --- CUDA architecture: must be set before enable_language(CUDA) so all
+#     targets inherit a valid default (CMake 3.18+ requires CUDA_ARCHITECTURES
+#     to be non-empty on every target once CUDA is enabled globally).
+set(CMAKE_CUDA_ARCHITECTURES 86)
+enable_language(CUDA)
 
 # --- Include directories ---
 include_directories(${ALPAKA_BASE}/include "../include")
@@ -86,12 +91,9 @@ target_include_directories(test_cpu PRIVATE "../sofieBLAS/include" ${ALPAKA_BASE
 target_link_libraries(test_cpu PRIVATE ${BLAS_LIBS})
 
 
-set(TEST_SRC test.cc)
-
 add_executable(test_cuda)
 target_sources(test_cuda PRIVATE test.cc)
 set_source_files_properties(test.cc PROPERTIES LANGUAGE CUDA)
-enable_language(CUDA)
 set_target_properties(test_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_compile_features(test_cuda PUBLIC cxx_std_20)
 
@@ -104,7 +106,7 @@ target_compile_options(test_cuda PRIVATE
 target_compile_definitions(test_cuda PRIVATE ALPAKA_ACC_GPU_CUDA_ENABLED)
 target_include_directories(test_cuda PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include" ${CUDA_BASE}/include)
 target_link_directories(test_cuda PRIVATE ${CUDA_BASE}/lib64)
-target_link_libraries(test_cuda PRIVATE cublas cudart)
+target_link_libraries(test_cuda PRIVATE cublasLt cublas cudart)
 
 # --- clean target equivalent ---
 add_custom_target(clean-all
