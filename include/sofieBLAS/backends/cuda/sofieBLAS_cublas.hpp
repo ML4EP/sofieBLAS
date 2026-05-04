@@ -113,9 +113,9 @@ public:
       checkAndAddLayout(k, m, lda);
     // Physical B: (k×n) if NoTrans, (n×k) if Trans
     if (transb == 'N' || transb == 'n')
-      checkAndAddLayout(n, k, ldb);
-    else
       checkAndAddLayout(k, n, ldb);
+    else
+      checkAndAddLayout(n, k, ldb);
     // C is always (m×n)
     checkAndAddLayout(m, n, ldc);
   }
