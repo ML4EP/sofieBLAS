@@ -191,6 +191,19 @@ public:
                   layoutKeyB(transb, k, n), {m, n});
   }
 
+  // matmul on raw pointers directly (no layout caching, caller must ensure
+  // correct leading dims and layout)
+  template <typename T, typename TIdx>
+  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
+                     unsigned int k, float alpha, T const &A, T const &B,
+                     float beta, T &C) {
+    auto desc =
+        makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                 CUBLASLT_EPILOGUE_DEFAULT);
+    executeMatmul(desc, alpha, A, B, beta, C, C, layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n});
+  }
+
 private:
   alpaka::QueueCudaRtNonBlocking m_queue;
 
