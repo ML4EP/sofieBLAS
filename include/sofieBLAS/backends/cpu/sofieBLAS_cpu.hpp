@@ -185,6 +185,40 @@ public:
     for (unsigned int i = 0; i < m * n; ++i)
       c[i] *= 0.5f * (1.0f + std::erff(c[i] * kInvSqrt2));
   }
+
+  // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr via getPtrNative()
+  template <typename T>
+  inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
+                   unsigned int k, float alpha, T const *A, T const *B,
+                   float beta, T *bias, T *C) {
+    int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m) : static_cast<int>(k);
+    int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k) : static_cast<int>(n);
+    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                alpha, A, lda, B, ldb, 0.0f, C, static_cast<int>(m));
+    for (unsigned int j = 0; j < n; ++j)
+      for (unsigned int i = 0; i < m; ++i)
+        C[j * m + i] += beta * bias[j * m + i] + bias[i];
+  }
+
+  template <typename T>
+  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha, T const *A, T const *B,
+                       float beta, T *bias, T *C) {
+    gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
+    for (unsigned int i = 0; i < m * n; ++i)
+      C[i] = C[i] > 0.0f ? C[i] : 0.0f;
+  }
+
+  template <typename T>
+  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha, T const *A, T const *B,
+                       float beta, T *bias, T *C) {
+    gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
+    constexpr float kInvSqrt2 = 0.7071067811865476f;
+    for (unsigned int i = 0; i < m * n; ++i)
+      C[i] *= 0.5f * (1.0f + std::erff(C[i] * kInvSqrt2));
+  }
 };
 
 namespace traits {

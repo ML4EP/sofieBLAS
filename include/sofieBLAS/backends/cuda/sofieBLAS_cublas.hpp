@@ -226,6 +226,40 @@ public:
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
+  // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr via getPtrNative()
+  template <typename T>
+  inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
+                   unsigned int k, float alpha, T const *A, T const *B,
+                   float beta, T *bias, T *C) {
+    const void *bptr = bias;
+    auto desc = makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                         CUBLASLT_EPILOGUE_BIAS, bptr);
+    executeMatmul(desc, alpha, A, B, beta, bias, C,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+  template <typename T>
+  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha, T const *A, T const *B,
+                       float beta, T *bias, T *C) {
+    const void *bptr = bias;
+    auto desc = makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                         CUBLASLT_EPILOGUE_RELU_BIAS, bptr);
+    executeMatmul(desc, alpha, A, B, beta, bias, C,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+  template <typename T>
+  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha, T const *A, T const *B,
+                       float beta, T *bias, T *C) {
+    const void *bptr = bias;
+    auto desc = makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                         CUBLASLT_EPILOGUE_GELU_BIAS, bptr);
+    executeMatmul(desc, alpha, A, B, beta, bias, C,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
   // C = alpha * op(A) * op(B) + beta * C  (no bias)
   template <typename T, typename TIdx>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
