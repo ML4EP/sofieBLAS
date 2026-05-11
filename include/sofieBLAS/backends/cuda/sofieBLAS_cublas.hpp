@@ -138,6 +138,24 @@ public:
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
+  template <typename T, typename TIdx>
+  inline void
+  gemm(char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+       float alpha,
+       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
+       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
+       float beta,
+       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
+       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+    const void *bptr = alpaka::getPtrNative(bias);
+    auto desc =
+        makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                 CUBLASLT_EPILOGUE_BIAS, bptr);
+    executeMatmul(desc, alpha, alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                  beta, alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
   // C = relu(alpha * op(A) * op(B) + beta * bias + bias_vec)
   template <typename T, typename TIdx>
   inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
@@ -147,6 +165,23 @@ public:
                        float beta,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
+    const void *bptr = alpaka::getPtrNative(bias);
+    auto desc =
+        makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                 CUBLASLT_EPILOGUE_RELU_BIAS, bptr);
+    executeMatmul(desc, alpha, alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                  beta, alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+  template <typename T, typename TIdx>
+  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
+                       float beta,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
     const void *bptr = alpaka::getPtrNative(bias);
     auto desc =
         makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
@@ -174,6 +209,23 @@ public:
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
+  template <typename T, typename TIdx>
+  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
+                       unsigned int k, float alpha,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
+                       float beta,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
+                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+    const void *bptr = alpaka::getPtrNative(bias);
+    auto desc =
+        makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                 CUBLASLT_EPILOGUE_GELU_BIAS, bptr);
+    executeMatmul(desc, alpha, alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                  beta, alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
   // C = alpha * op(A) * op(B) + beta * C  (no bias)
   template <typename T, typename TIdx>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
@@ -186,6 +238,22 @@ public:
         makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
                  CUBLASLT_EPILOGUE_DEFAULT);
     float *c = alpaka::getPtrNative(C);
+    executeMatmul(desc, alpha, alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                  beta, c, c, layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n});
+  }
+
+  template <typename T, typename TIdx>
+  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
+                     unsigned int k, float alpha,
+                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
+                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
+                     float beta,
+                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+    auto desc =
+        makeDesc(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
+                 CUBLASLT_EPILOGUE_DEFAULT);
+    T *c = alpaka::getPtrNative(C);
     executeMatmul(desc, alpha, alpaka::getPtrNative(A), alpaka::getPtrNative(B),
                   beta, c, c, layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n});
