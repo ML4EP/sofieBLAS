@@ -31,22 +31,6 @@
   } while (0)
 
 
-struct PairHash {
-  std::size_t
-  operator()(const std::pair<std::size_t, std::size_t> &p) const noexcept {
-    std::size_t h1 = std::hash<std::size_t>{}(p.first);
-    std::size_t h2 = std::hash<std::size_t>{}(p.second);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
-  }
-};
-
-struct PairEq {
-  bool operator()(const std::pair<std::size_t, std::size_t> &a,
-                  const std::pair<std::size_t, std::size_t> &b) const noexcept {
-    return a.first == b.first && a.second == b.second;
-  }
-};
-
 struct DescKey {
   int transA;   // CUBLAS_OP_N / CUBLAS_OP_T encoded as int
   int transB;
@@ -69,8 +53,8 @@ struct DescKeyHash {
 
 struct AlgoKey {
   DescKey   dk;
-  std::size_t rowsA, colsA;  // physical dimensions of A in layoutStore
-  std::size_t rowsB, colsB;  // physical dimensions of B in layoutStore
+  std::size_t rowsA, colsA;  // physical dimensions of A
+  std::size_t rowsB, colsB;  // physical dimensions of B
   bool operator==(const AlgoKey &o) const noexcept {
     return dk == o.dk
         && rowsA == o.rowsA && colsA == o.colsA
@@ -98,9 +82,12 @@ class BlasCuda {
   size_t workspaceSize = 1u << 25;  // 32 MB (was 4 MB)
   cudaStream_t stream = nullptr;
 
-  std::unordered_map<std::pair<std::size_t, std::size_t>,
-                     cublasLtMatrixLayout_t, PairHash, PairEq>
-      layoutStore;
+  // One persistent layout descriptor per matrix role, re-stamped with the
+  // runtime dimensions before each matmul. The descriptor is host-side metadata
+  // consumed by cublasLtMatmul at the call, so a single object can be reused
+  // across shapes - this is what lets one Session serve dynamic (runtime) sizes.
+  enum LayoutRole { ROLE_A = 0, ROLE_B = 1, ROLE_C = 2 };
+  cublasLtMatrixLayout_t roleLayout[3] = {};
 
   std::unordered_map<DescKey, cublasLtMatmulDesc_t, DescKeyHash> descStore;
 
@@ -129,8 +116,8 @@ public:
   }
 
   ~BlasCuda() {
-    for (auto &[key, layout] : layoutStore)
-      if (layout) cublasLtMatrixLayoutDestroy(layout);
+    for (auto L : roleLayout)
+      if (L) cublasLtMatrixLayoutDestroy(L);
     for (auto &[key, desc] : descStore)
       if (desc) cublasLtMatmulDescDestroy(desc);
     if (preference)  cublasLtMatmulPreferenceDestroy(preference);
@@ -149,22 +136,9 @@ public:
     }
   }
 
-  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k,
-                       std::size_t lda, std::size_t ldb, std::size_t ldc,
-                       char transa, char transb) {
-    // Physical A: (m×k) if NoTrans, (k×m) if Trans
-    if (transa == 'N' || transa == 'n')
-      checkAndAddLayout(m, k, lda);
-    else
-      checkAndAddLayout(k, m, lda);
-    // Physical B: (k×n) if NoTrans, (n×k) if Trans
-    if (transb == 'N' || transb == 'n')
-      checkAndAddLayout(k, n, ldb);
-    else
-      checkAndAddLayout(n, k, ldb);
-    // C is always (m×n)
-    checkAndAddLayout(m, n, ldc);
-  }
+  // No-op kept for the generated ctor's API; layouts are created lazily now.
+  void addLayoutConfig(std::size_t, std::size_t, std::size_t,
+                       std::size_t, std::size_t, std::size_t, char, char) {}
 
   template <typename T, typename TIdx>
   inline void
@@ -370,14 +344,25 @@ private:
                                           : std::make_pair(n, k);
   }
 
-  void checkAndAddLayout(std::size_t rows, std::size_t cols, std::size_t ld) {
-    auto key = std::make_pair(rows, cols);
-    if (layoutStore.find(key) == layoutStore.end()) {
-      cublasLtMatrixLayout_t layout = nullptr;
-      CHECK_CUBLAS(
-          cublasLtMatrixLayoutCreate(&layout, CUDA_R_32F, rows, cols, ld));
-      layoutStore.emplace(key, layout);
+  // Resolve a matrix role's layout at the runtime dims: create the descriptor
+  // once, then overwrite its dims in place on later calls. ld = rows (dense,
+  // column-major, as the generated calls produce).
+  cublasLtMatrixLayout_t stampLayout(LayoutRole role,
+                                     const std::pair<std::size_t, std::size_t> &key) {
+    const uint64_t rows = key.first, cols = key.second;
+    const int64_t  ld   = static_cast<int64_t>(key.first);
+    cublasLtMatrixLayout_t &L = roleLayout[role];
+    if (!L) {
+      CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&L, CUDA_R_32F, rows, cols, ld));
+    } else {
+      CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+          L, CUBLASLT_MATRIX_LAYOUT_ROWS, &rows, sizeof(rows)));
+      CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+          L, CUBLASLT_MATRIX_LAYOUT_COLS, &cols, sizeof(cols)));
+      CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+          L, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
     }
+    return L;
   }
 
   cublasLtMatmulDesc_t &getOrCreateDesc(cublasOperation_t transA,
@@ -421,12 +406,13 @@ private:
       return it->second;
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);   // C and D share the same layout
     cublasLtMatmulHeuristicResult_t h{};
     int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
-        ltHandle, desc,
-        layoutStore.at(kA), layoutStore.at(kB),
-        layoutStore.at(kC), layoutStore.at(kC),
+        ltHandle, desc, lA, lB, lC, lC,
         preference, 1, &h, &returnedResults));
     if (returnedResults == 0) {
       std::cerr << "[sofieBLAS] No suitable cuBLASLt algorithm found for "
@@ -459,12 +445,17 @@ private:
           &bias_ptr, sizeof(bias_ptr)));
     }
 
+    // Re-stamp the shared role layouts to this call's shape right before the
+    // matmul (the algo-cache hit path in getOrComputeAlgo skips stamping).
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);
     CHECK_CUBLAS(cublasLtMatmul(
         ltHandle, desc,
-        &alpha, A, layoutStore.at(kA),
-                B, layoutStore.at(kB),
-        &beta, D_in, layoutStore.at(kC),
-               C_out, layoutStore.at(kC),
+        &alpha, A, lA,
+                B, lB,
+        &beta, D_in, lC,
+               C_out, lC,
         &h.algo, d_workspace, workspaceSize, stream));
   }
 };
