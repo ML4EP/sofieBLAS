@@ -5,9 +5,11 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
@@ -74,6 +76,17 @@ struct AlgoKeyHash {
   }
 };
 
+// A call site's maximum shape, as declared by addLayoutConfig from the
+// generated Session constructor.
+struct ShapeEnvelope {
+  std::size_t rowsA, colsA, rowsB, colsB, rowsC, colsC;
+};
+
+struct LayoutStats {
+  std::size_t heuristicQueries = 0;
+  std::size_t envelopeRejects  = 0;  // envelope algorithm unusable at the call
+};
+
 class BlasCuda {
   cublasLtHandle_t           ltHandle   = nullptr;
   cublasHandle_t             handle     = nullptr;  // legacy cuBLAS for batched ops
@@ -94,7 +107,15 @@ class BlasCuda {
   std::unordered_map<AlgoKey, cublasLtMatmulHeuristicResult_t, AlgoKeyHash>
       algoCache;
 
+  // call-site envelopes declared by addLayoutConfig
+  std::vector<ShapeEnvelope> envelopes;
+
+  LayoutStats stats;
+
 public:
+  const LayoutStats &layoutStats() const { return stats; }
+  std::size_t algoCacheSize()     const { return algoCache.size(); }
+
   BlasCuda(const BlasCuda &) = delete;
   BlasCuda &operator=(const BlasCuda &) = delete;
   BlasCuda(BlasCuda &&) = delete;
@@ -136,9 +157,31 @@ public:
     }
   }
 
-  // No-op kept for the generated ctor's API; layouts are created lazily now.
-  void addLayoutConfig(std::size_t, std::size_t, std::size_t,
-                       std::size_t, std::size_t, std::size_t, char, char) {}
+  // Records the call site's envelope. The generated constructor evaluates its
+  // shape expressions with its own parameters, so for a dynamic model these are
+  // the largest dims the call site will ever use. Layouts are created lazily,
+  // so nothing is registered here beyond the envelope and, with warmup on, the
+  // algorithm resolved for it.
+  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k,
+                       std::size_t, std::size_t, std::size_t,
+                       char transa, char transb) {
+    const auto kA = layoutKeyA(transa, m, k);
+    const auto kB = layoutKeyB(transb, k, n);
+    const std::pair<std::size_t, std::size_t> kC{m, n};
+    envelopes.push_back({kA.first, kA.second, kB.first, kB.second, m, n});
+
+    // The constructor does not know which epilogue this call site uses, so
+    // resolve all three. Unused ones cost one heuristic query each, off the
+    // inference path.
+    const cublasOperation_t tA = charToCuBlasTranspose(transa);
+    const cublasOperation_t tB = charToCuBlasTranspose(transb);
+    const cublasLtEpilogue_t eps[] = {CUBLASLT_EPILOGUE_DEFAULT,
+                                      CUBLASLT_EPILOGUE_BIAS,
+                                      CUBLASLT_EPILOGUE_RELU_BIAS};
+    for (cublasLtEpilogue_t ep : eps) {
+      getOrComputeAlgo(tA, tB, ep, kA, kB, kC, /*required=*/false);
+    }
+  }
 
   template <typename T, typename TIdx>
   inline void
@@ -365,6 +408,32 @@ private:
     return L;
   }
 
+  // Tightest declared envelope covering this call, or null if none does.
+  // Tightest matters: several envelopes may cover a small shape, but only the
+  // call site's own matches its weight dims exactly and so has zero excess
+  // on those axes.
+  const ShapeEnvelope *
+  findEnvelope(const std::pair<std::size_t, std::size_t> &kA,
+               const std::pair<std::size_t, std::size_t> &kB,
+               const std::pair<std::size_t, std::size_t> &kC) const {
+    const ShapeEnvelope *best = nullptr;
+    std::size_t bestExcess = std::numeric_limits<std::size_t>::max();
+    for (const auto &e : envelopes) {
+      // colsA and rowsB are both the contraction dimension k, which comes from
+      // the weight tensor and never varies at runtime. Requiring an exact match
+      // on it stops one call site's envelope from serving another's shapes.
+      if (e.colsA != kA.second || e.rowsB != kB.first)
+        continue;
+      if (e.rowsA < kA.first || e.colsB < kB.second ||
+          e.rowsC < kC.first || e.colsC < kC.second)
+        continue;
+      const std::size_t ex = (e.rowsA - kA.first) + (e.colsA - kA.second) +
+                             (e.rowsB - kB.first) + (e.colsB - kB.second);
+      if (ex < bestExcess) { bestExcess = ex; best = &e; }
+    }
+    return best;
+  }
+
   cublasLtMatmulDesc_t &getOrCreateDesc(cublasOperation_t transA,
                                          cublasOperation_t transB,
                                          cublasLtEpilogue_t epilogue) {
@@ -393,17 +462,37 @@ private:
     return descStore.at(key);
   }
 
-  cublasLtMatmulHeuristicResult_t &
+  // Whether an algorithm can actually run this shape. cuBLASLt rejects some
+  // combinations, so an algorithm resolved at a call site's envelope is not
+  // guaranteed to work at every smaller shape it serves.
+  bool algoUsable(cublasLtMatmulDesc_t desc, const cublasLtMatmulAlgo_t &algo,
+                  const std::pair<std::size_t, std::size_t> &kA,
+                  const std::pair<std::size_t, std::size_t> &kB,
+                  const std::pair<std::size_t, std::size_t> &kC) {
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);
+    cublasLtMatmulHeuristicResult_t chk{};
+    return cublasLtMatmulAlgoCheck(ltHandle, desc, lA, lB, lC, lC, &algo,
+                                   &chk) == CUBLAS_STATUS_SUCCESS &&
+           chk.workspaceSize <= workspaceSize;
+  }
+
+  // required=false is used by constructor warmup, which speculatively resolves
+  // epilogues the call site may never use: those may legitimately have no
+  // algorithm and must not abort.
+  cublasLtMatmulHeuristicResult_t *
   getOrComputeAlgo(cublasOperation_t transA, cublasOperation_t transB,
                    cublasLtEpilogue_t epilogue,
                    const std::pair<std::size_t, std::size_t> &kA,
                    const std::pair<std::size_t, std::size_t> &kB,
-                   const std::pair<std::size_t, std::size_t> &kC) {
+                   const std::pair<std::size_t, std::size_t> &kC,
+                   bool required = true) {
     AlgoKey key{{(int)transA, (int)transB, (int)epilogue},
                 kA.first, kA.second, kB.first, kB.second};
     auto it = algoCache.find(key);
     if (it != algoCache.end())
-      return it->second;
+      return &it->second;
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     auto lA = stampLayout(ROLE_A, kA);
@@ -414,7 +503,10 @@ private:
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
         ltHandle, desc, lA, lB, lC, lC,
         preference, 1, &h, &returnedResults));
+    ++stats.heuristicQueries;
     if (returnedResults == 0) {
+      if (!required)
+        return nullptr;
       std::cerr << "[sofieBLAS] No suitable cuBLASLt algorithm found for "
                 << "transA=" << transA << " transB=" << transB
                 << " epilogue=" << epilogue
@@ -422,8 +514,7 @@ private:
                 << " B=[" << kB.first << "x" << kB.second << "]\n";
       exit(EXIT_FAILURE);
     }
-    algoCache.emplace(key, h);
-    return algoCache.at(key);
+    return &algoCache.emplace(key, h).first->second;
   }
 
   void executeMatmul(cublasOperation_t transA, cublasOperation_t transB,
@@ -434,10 +525,6 @@ private:
                      const std::pair<std::size_t, std::size_t> &kA,
                      const std::pair<std::size_t, std::size_t> &kB,
                      const std::pair<std::size_t, std::size_t> &kC) {
-    // Retrieve (or lazily compute) the cached algorithm for this shape
-    auto &h = getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
-
-    // Retrieve the cached descriptor and patch the real bias pointer in-place
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     if (bias_ptr) {
       CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
@@ -445,8 +532,25 @@ private:
           &bias_ptr, sizeof(bias_ptr)));
     }
 
-    // Re-stamp the shared role layouts to this call's shape right before the
-    // matmul (the algo-cache hit path in getOrComputeAlgo skips stamping).
+    // Resolve at this call site's declared envelope, so every runtime size it
+    // produces shares one cache entry.
+    const ShapeEnvelope *env = findEnvelope(kA, kB, kC);
+    const std::pair<std::size_t, std::size_t>
+        aA = env ? std::make_pair(env->rowsA, env->colsA) : kA,
+        aB = env ? std::make_pair(env->rowsB, env->colsB) : kB,
+        aC = env ? std::make_pair(env->rowsC, env->colsC) : kC;
+    auto *h = getOrComputeAlgo(transA, transB, epilogue, aA, aB, aC);
+
+    // Fall back to the exact shape when the envelope's algorithm cannot run
+    // it. cuBLASLt returns CUBLAS_STATUS_NOT_SUPPORTED for at least some
+    // shape/algorithm combinations; m=1 was the first observed.
+    if (env && !algoUsable(desc, h->algo, kA, kB, kC)) {
+      ++stats.envelopeRejects;
+      h = getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
+    }
+
+    // Re-stamp the shared role layouts to this call's exact shape. Resolving
+    // the algorithm leaves them at the envelope size, so this happens last.
     auto lA = stampLayout(ROLE_A, kA);
     auto lB = stampLayout(ROLE_B, kB);
     auto lC = stampLayout(ROLE_C, kC);
@@ -456,7 +560,7 @@ private:
                 B, lB,
         &beta, D_in, lC,
                C_out, lC,
-        &h.algo, d_workspace, workspaceSize, stream));
+        &h->algo, d_workspace, workspaceSize, stream));
   }
 };
 
