@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -84,6 +85,7 @@ struct ShapeEnvelope {
 struct LayoutStats {
   std::size_t heuristicQueries = 0;
   std::size_t envelopeRejects  = 0;  // envelope algorithm unusable at the call
+  std::size_t evictions        = 0;  // entries dropped to stay under the limit
 };
 
 class BlasCuda {
@@ -103,8 +105,20 @@ class BlasCuda {
 
   std::unordered_map<DescKey, cublasLtMatmulDesc_t, DescKeyHash> descStore;
 
-  std::unordered_map<AlgoKey, cublasLtMatmulHeuristicResult_t, AlgoKeyHash>
-      algoCache;
+  // Recency handle is only maintained when a limit is set; with no limit the
+  // list stays empty and the iterator is never read.
+  struct CacheEntry {
+    cublasLtMatmulHeuristicResult_t h{};
+    std::list<AlgoKey>::iterator    lru{};
+  };
+  std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
+  std::list<AlgoKey> lruOrder;
+  // 0 = unbounded. Per-call-site resolution already bounds the cache by the
+  // number of Conv/Gemm in the model, so a limit only matters when infer()
+  // runs above the constructed size: those shapes have no envelope and are
+  // resolved individually. Set it below the number of call sites and
+  // construction will evict its own warmup.
+  std::size_t algoCacheLimit = 0;
 
   // call-site envelopes declared by addLayoutConfig
   std::vector<ShapeEnvelope> envelopes;
@@ -114,13 +128,16 @@ class BlasCuda {
 public:
   const LayoutStats &layoutStats() const { return stats; }
   std::size_t algoCacheSize()     const { return algoCache.size(); }
+  void setAlgoCacheLimit(std::size_t n) { algoCacheLimit = n; }
 
   BlasCuda(const BlasCuda &) = delete;
   BlasCuda &operator=(const BlasCuda &) = delete;
   BlasCuda(BlasCuda &&) = delete;
   BlasCuda &operator=(BlasCuda &&) = delete;
 
-  BlasCuda(alpaka::QueueCudaRtNonBlocking &queue) : m_queue{queue} {
+  BlasCuda(alpaka::QueueCudaRtNonBlocking &queue,
+           std::size_t algoCacheLimit_ = 0)
+      : algoCacheLimit{algoCacheLimit_}, m_queue{queue} {
     stream = static_cast<cudaStream_t>(m_queue.getNativeHandle());
 
     CHECK_CUBLAS(cublasLtCreate(&ltHandle));
@@ -505,8 +522,11 @@ private:
                 kB.first,
                 kB.second};
     auto it = algoCache.find(key);
-    if (it != algoCache.end())
-      return &it->second;
+    if (it != algoCache.end()) {
+      if (algoCacheLimit)
+        lruOrder.splice(lruOrder.begin(), lruOrder, it->second.lru);
+      return &it->second.h;
+    }
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     auto lA = stampLayout(ROLE_A, kA);
@@ -527,7 +547,17 @@ private:
                 << " B=[" << kB.first << "x" << kB.second << "]\n";
       exit(EXIT_FAILURE);
     }
-    return &algoCache.emplace(key, h).first->second;
+    auto ins = algoCache.emplace(key, CacheEntry{h, {}}).first;
+    if (algoCacheLimit) {
+      lruOrder.push_front(key);
+      ins->second.lru = lruOrder.begin();
+      while (algoCache.size() > algoCacheLimit) {
+        algoCache.erase(lruOrder.back());
+        lruOrder.pop_back();
+        ++stats.evictions;
+      }
+    }
+    return &ins->second.h;
   }
 
   void executeMatmul(cublasOperation_t transA, cublasOperation_t transB,
@@ -551,14 +581,15 @@ private:
         aA = env ? std::make_pair(env->rowsA, env->colsA) : kA,
         aB = env ? std::make_pair(env->rowsB, env->colsB) : kB,
         aC = env ? std::make_pair(env->rowsC, env->colsC) : kC;
-    auto *h = getOrComputeAlgo(transA, transB, epilogue, aA, aB, aC);
+    cublasLtMatmulHeuristicResult_t h =
+        *getOrComputeAlgo(transA, transB, epilogue, aA, aB, aC);
 
     // Fall back to the exact shape when the envelope's algorithm cannot run
     // it. cuBLASLt returns CUBLAS_STATUS_NOT_SUPPORTED for at least some
     // shape/algorithm combinations; m=1 was the first observed.
-    if (env && !algoUsable(desc, h->algo, kA, kB, kC)) {
+    if (env && !algoUsable(desc, h.algo, kA, kB, kC)) {
       ++stats.envelopeRejects;
-      h = getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
+      h = *getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
     }
 
     // Re-stamp the shared role layouts to this call's exact shape. Resolving
@@ -567,7 +598,7 @@ private:
     auto lB = stampLayout(ROLE_B, kB);
     auto lC = stampLayout(ROLE_C, kC);
     CHECK_CUBLAS(cublasLtMatmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
-                                D_in, lC, C_out, lC, &h->algo, d_workspace,
+                                D_in, lC, C_out, lC, &h.algo, d_workspace,
                                 workspaceSize, stream));
   }
 };
