@@ -177,7 +177,7 @@ if(CMAKE_HIP_COMPILER)
   )
 
   target_compile_definitions(test_hip PRIVATE ALPAKA_ACC_GPU_HIP_ENABLED)
-  target_include_directories(test_hip PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include" ${ROCM_BASE}/include)
+  target_include_directories(test_hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${ALPAKA_BASE}/include "../sofieBLAS/include" ${ROCM_BASE}/include)
   target_link_directories(test_hip PRIVATE ${ROCM_BASE}/lib)
   target_link_libraries(test_hip PRIVATE hipblaslt hipblas amdhip64)
 endif()
