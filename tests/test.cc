@@ -357,10 +357,10 @@ int main() {
   runCpuTests();
 #endif
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
-  runGpuTests<alpaka::TagGpuCudaRt>("cuda");
+  runGpuTests<alpaka::TagGpuCudaRt>("CUDA");
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
-  runGpuTests<alpaka::TagGpuHipRt>("hip");
+  runGpuTests<alpaka::TagGpuHipRt>("HIP");
 #endif
 
   std::cout << "\n";

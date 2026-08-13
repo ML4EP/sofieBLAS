@@ -24,16 +24,30 @@ set(CXX_HOST_FLAGS -fPIC -pthread)
 set(CXX_CUDA_FLAGS -Wno-deprecated-gpu-targets --extended-lambda --expt-relaxed-constexpr)
 set(XCOMPILER_FLAGS -Xcompiler=-fPIC,-pthread)
 
+include(CheckLanguage)
+
 # --- CUDA architecture: must be set before enable_language(CUDA) so all
 #     targets inherit a valid default (CMake 3.18+ requires CUDA_ARCHITECTURES
-#     to be non-empty on every target once CUDA is enabled globally).
-set(CMAKE_CUDA_ARCHITECTURES 86)
-enable_language(CUDA)
+#     to be non-empty on every target once CUDA is enabled globally). Defaults
+#     to the architecture of the GPU in the build machine; override with
+#     -DCMAKE_CUDA_ARCHITECTURES=<arch> to build for a different one.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(CMAKE_CUDA_ARCHITECTURES native)
+  else()
+    set(CMAKE_CUDA_ARCHITECTURES 75)
+  endif()
+endif()
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+else()
+  message(STATUS "No CUDA compiler found, test_cuda target will not be built")
+endif()
 
-# --- HIP architecture: must be set before enable_language(HIP) for the same
-#     reason as CUDA_ARCHITECTURES above.
-set(CMAKE_HIP_ARCHITECTURES gfx1100)
-include(CheckLanguage)
+# --- HIP architecture: CMAKE_HIP_ARCHITECTURES is left unset on purpose, so
+#     CMake initializes it from rocm_agent_enumerator, i.e. the GPUs actually
+#     installed. Override with -DCMAKE_HIP_ARCHITECTURES=<arch> if needed.
 check_language(HIP)
 if(CMAKE_HIP_COMPILER)
   enable_language(HIP)
@@ -46,10 +60,10 @@ include_directories(${ALPAKA_BASE}/include "../include")
 
 # --- Functions to find BLAS libraries ---
 function(find_openblas blas_lib blas_define blas_include)
-  find_path(OPENBLAS_PATH NAMES libopenblas.a
-    PATHS /usr/lib/x86_64-linux-gnu/openblas-serial /usr/lib/x86_64-linux-gnu)
+  find_path(OPENBLAS_PATH NAMES libopenblas.a libopenblas.so libopenblas.so.0
+    PATHS /usr/lib64 /usr/lib/x86_64-linux-gnu/openblas-serial /usr/lib/x86_64-linux-gnu)
   if(OPENBLAS_PATH)
-    find_library(OPENBLAS_LIB openblas PATHS ${OPENBLAS_PATH})
+    find_library(OPENBLAS_LIB NAMES openblas libopenblas.so.0 PATHS ${OPENBLAS_PATH})
     find_path(OPENBLAS_INCLUDE_DIR NAMES cblas.h
       PATHS /usr/include /usr/include/openblas /usr/include/cblas)
     set(${blas_lib} ${OPENBLAS_LIB} PARENT_SCOPE)
@@ -143,22 +157,25 @@ target_include_directories(test_cpu PRIVATE "../sofieBLAS/include" ${ALPAKA_BASE
 target_link_libraries(test_cpu PRIVATE ${BLAS_LIBS})
 
 
-add_executable(test_cuda)
-target_sources(test_cuda PRIVATE test.cc)
-set_source_files_properties(test.cc PROPERTIES LANGUAGE CUDA)
-set_target_properties(test_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_compile_features(test_cuda PUBLIC cxx_std_20)
+# --- test_cuda target ---
+if(CMAKE_CUDA_COMPILER)
+  add_executable(test_cuda)
+  target_sources(test_cuda PRIVATE test.cc)
+  set_source_files_properties(test.cc PROPERTIES LANGUAGE CUDA)
+  set_target_properties(test_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  target_compile_features(test_cuda PUBLIC cxx_std_20)
 
-target_compile_options(test_cuda PRIVATE
-  ${CXXFLAGS}
-  ${CXX_CUDA_FLAGS}
-  ${XCOMPILER_FLAGS}
-)
+  target_compile_options(test_cuda PRIVATE
+    ${CXXFLAGS}
+    ${CXX_CUDA_FLAGS}
+    ${XCOMPILER_FLAGS}
+  )
 
-target_compile_definitions(test_cuda PRIVATE ALPAKA_ACC_GPU_CUDA_ENABLED)
-target_include_directories(test_cuda PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include" ${CUDA_BASE}/include)
-target_link_directories(test_cuda PRIVATE ${CUDA_BASE}/lib64)
-target_link_libraries(test_cuda PRIVATE cublasLt cublas cudart)
+  target_compile_definitions(test_cuda PRIVATE ALPAKA_ACC_GPU_CUDA_ENABLED)
+  target_include_directories(test_cuda PRIVATE ${ALPAKA_BASE}/include "../sofieBLAS/include" ${CUDA_BASE}/include)
+  target_link_directories(test_cuda PRIVATE ${CUDA_BASE}/lib64)
+  target_link_libraries(test_cuda PRIVATE cublasLt cublas cudart)
+endif()
 
 # --- test_hip target ---
 if(CMAKE_HIP_COMPILER)
