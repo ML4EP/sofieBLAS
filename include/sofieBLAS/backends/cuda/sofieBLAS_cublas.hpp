@@ -32,9 +32,8 @@
     }                                                                          \
   } while (0)
 
-
 struct DescKey {
-  int transA;   // CUBLAS_OP_N / CUBLAS_OP_T encoded as int
+  int transA; // CUBLAS_OP_N / CUBLAS_OP_T encoded as int
   int transB;
   int epilogue; // cublasLtEpilogue_t encoded as int
   bool operator==(const DescKey &o) const noexcept {
@@ -44,23 +43,20 @@ struct DescKey {
 
 struct DescKeyHash {
   std::size_t operator()(const DescKey &k) const noexcept {
-    // Small values: simple polynomial hash
-    std::size_t h = static_cast<std::size_t>(k.transA) * 97u
-                  + static_cast<std::size_t>(k.transB) * 31u
-                  + static_cast<std::size_t>(k.epilogue);
+    std::size_t h = static_cast<std::size_t>(k.transA) * 97u +
+                    static_cast<std::size_t>(k.transB) * 31u +
+                    static_cast<std::size_t>(k.epilogue);
     return h ^ (h >> 16);
   }
 };
 
-
 struct AlgoKey {
-  DescKey   dk;
-  std::size_t rowsA, colsA;  // physical dimensions of A
-  std::size_t rowsB, colsB;  // physical dimensions of B
+  DescKey dk;
+  std::size_t rowsA, colsA;
+  std::size_t rowsB, colsB;
   bool operator==(const AlgoKey &o) const noexcept {
-    return dk == o.dk
-        && rowsA == o.rowsA && colsA == o.colsA
-        && rowsB == o.rowsB && colsB == o.colsB;
+    return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
+           rowsB == o.rowsB && colsB == o.colsB;
   }
 };
 
@@ -68,10 +64,13 @@ struct AlgoKeyHash {
   std::size_t operator()(const AlgoKey &k) const noexcept {
     std::size_t h = DescKeyHash{}(k.dk);
     auto mix = [&](std::size_t v) {
-      h ^= std::hash<std::size_t>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+      h ^= std::hash<std::size_t>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+           (h >> 2);
     };
-    mix(k.rowsA); mix(k.colsA);
-    mix(k.rowsB); mix(k.colsB);
+    mix(k.rowsA);
+    mix(k.colsA);
+    mix(k.rowsB);
+    mix(k.colsB);
     return h;
   }
 };
@@ -88,11 +87,11 @@ struct LayoutStats {
 };
 
 class BlasCuda {
-  cublasLtHandle_t           ltHandle   = nullptr;
-  cublasHandle_t             handle     = nullptr;  // legacy cuBLAS for batched ops
+  cublasLtHandle_t ltHandle = nullptr;
+  cublasHandle_t handle = nullptr;
   cublasLtMatmulPreference_t preference = nullptr;
-  void *d_workspace  = nullptr;
-  size_t workspaceSize = 1u << 25;  // 32 MB (was 4 MB)
+  void *d_workspace = nullptr;
+  size_t workspaceSize = 1u << 25; // 32 MB
   cudaStream_t stream = nullptr;
 
   // One persistent layout descriptor per matrix role, re-stamped with the
@@ -138,20 +137,32 @@ public:
 
   ~BlasCuda() {
     for (auto L : roleLayout)
-      if (L) cublasLtMatrixLayoutDestroy(L);
+      if (L)
+        cublasLtMatrixLayoutDestroy(L);
     for (auto &[key, desc] : descStore)
-      if (desc) cublasLtMatmulDescDestroy(desc);
-    if (preference)  cublasLtMatmulPreferenceDestroy(preference);
-    if (ltHandle)    cublasLtDestroy(ltHandle);
-    if (handle)      cublasDestroy(handle);
-    if (d_workspace) cudaFree(d_workspace);
+      if (desc)
+        cublasLtMatmulDescDestroy(desc);
+    if (preference)
+      cublasLtMatmulPreferenceDestroy(preference);
+    if (ltHandle)
+      cublasLtDestroy(ltHandle);
+    if (handle)
+      cublasDestroy(handle);
+    if (d_workspace)
+      cudaFree(d_workspace);
   }
 
   inline cublasOperation_t charToCuBlasTranspose(char trans) {
     switch (trans) {
-    case 'N': case 'n': return CUBLAS_OP_N;
-    case 'T': case 't': return CUBLAS_OP_T;
-    case 'C': case 'c': return CUBLAS_OP_C;
+    case 'N':
+    case 'n':
+      return CUBLAS_OP_N;
+    case 'T':
+    case 't':
+      return CUBLAS_OP_T;
+    case 'C':
+    case 'c':
+      return CUBLAS_OP_C;
     default:
       throw std::invalid_argument("Invalid transpose character for cuBLAS.");
     }
@@ -191,26 +202,29 @@ public:
        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
-  inline void
-  gemm(char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
-       float alpha,
-       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
-       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
-       float beta,
-       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
-       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void gemm(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx>
+          &bias,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
@@ -221,8 +235,8 @@ public:
                    float beta, T *bias, T *C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
                   CUBLASLT_EPILOGUE_BIAS, alpha, A, B, beta, bias, C,
-                  static_cast<const void *>(bias),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
@@ -234,25 +248,29 @@ public:
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_RELU_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_RELU_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
-  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
-                       float beta,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void gemmrelu(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx>
+          &bias,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_RELU_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_RELU_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
@@ -263,8 +281,8 @@ public:
                        float beta, T *bias, T *C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
                   CUBLASLT_EPILOGUE_RELU_BIAS, alpha, A, B, beta, bias, C,
-                  static_cast<const void *>(bias),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
@@ -276,25 +294,29 @@ public:
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_GELU_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_GELU_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
-  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
-                       float beta,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &bias,
-                       alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void gemmgelu(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx>
+          &bias,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_GELU_BIAS, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                  CUBLASLT_EPILOGUE_GELU_BIAS, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
@@ -305,8 +327,8 @@ public:
                        float beta, T *bias, T *C) {
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
                   CUBLASLT_EPILOGUE_GELU_BIAS, alpha, A, B, beta, bias, C,
-                  static_cast<const void *>(bias),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
@@ -318,24 +340,25 @@ public:
                      alpaka::BufCudaRt<T, alpaka::DimInt<1u>, TIdx> &C) {
     float *c = alpaka::getPtrNative(C);
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_DEFAULT, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  c, c, nullptr,
+                  CUBLASLT_EPILOGUE_DEFAULT, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, c, c, nullptr,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
   template <typename T, typename TIdx>
-  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
-                     unsigned int k, float alpha,
-                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &A,
-                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const &B,
-                     float beta,
-                     alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void matmul(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCudaRt, T, alpaka::DimInt<1u>, TIdx> &C) {
     T *c = alpaka::getPtrNative(C);
     executeMatmul(charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-                  CUBLASLT_EPILOGUE_DEFAULT, alpha,
-                  alpaka::getPtrNative(A), alpaka::getPtrNative(B), beta,
-                  c, c, nullptr,
+                  CUBLASLT_EPILOGUE_DEFAULT, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), beta, c, c, nullptr,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
@@ -349,31 +372,19 @@ public:
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
-  inline void gemmStridedBatched(
-      char transa, char transb,
-      int m, int n, int k, float alpha,
-      const float *A, int lda, long long strideA,
-      const float *B, int ldb, long long strideB,
-      float beta,
-      float *C, int ldc, long long strideC,
-      int batchCount)
-  {
+  inline void gemmStridedBatched(char transa, char transb, int m, int n, int k,
+                                 float alpha, const float *A, int lda,
+                                 long long strideA, const float *B, int ldb,
+                                 long long strideB, float beta, float *C,
+                                 int ldc, long long strideC, int batchCount) {
     CHECK_CUBLAS(cublasSgemmStridedBatched(
-        handle,
-        charToCuBlasTranspose(transa), charToCuBlasTranspose(transb),
-        m, n, k,
-        &alpha,
-        A, lda, strideA,
-        B, ldb, strideB,
-        &beta,
-        C, ldc, strideC,
+        handle, charToCuBlasTranspose(transa), charToCuBlasTranspose(transb), m,
+        n, k, &alpha, A, lda, strideA, B, ldb, strideB, &beta, C, ldc, strideC,
         batchCount));
-    // No cudaStreamSynchronize — operations remain asynchronous on the stream
   }
 
 private:
   alpaka::QueueCudaRtNonBlocking m_queue;
-
 
   static std::pair<std::size_t, std::size_t>
   layoutKeyA(char trans, std::size_t m, std::size_t k) {
@@ -435,8 +446,8 @@ private:
   }
 
   cublasLtMatmulDesc_t &getOrCreateDesc(cublasOperation_t transA,
-                                         cublasOperation_t transB,
-                                         cublasLtEpilogue_t epilogue) {
+                                        cublasOperation_t transB,
+                                        cublasLtEpilogue_t epilogue) {
     DescKey key{(int)transA, (int)transB, (int)epilogue};
     auto it = descStore.find(key);
     if (it != descStore.end())
@@ -452,7 +463,7 @@ private:
     CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
         desc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
     // For bias epilogues: set a non-null dummy pointer so the descriptor is
-    // valid for cublasLtMatmulAlgoGetHeuristic (real pointer patched per call).
+    // valid for cublasLtMatmulAlgoGetHeuristic.
     if (epilogue != CUBLASLT_EPILOGUE_DEFAULT) {
       const void *dummy = d_workspace;
       CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
@@ -489,7 +500,10 @@ private:
                    const std::pair<std::size_t, std::size_t> &kC,
                    bool required = true) {
     AlgoKey key{{(int)transA, (int)transB, (int)epilogue},
-                kA.first, kA.second, kB.first, kB.second};
+                kA.first,
+                kA.second,
+                kB.first,
+                kB.second};
     auto it = algoCache.find(key);
     if (it != algoCache.end())
       return &it->second;
@@ -501,16 +515,15 @@ private:
     cublasLtMatmulHeuristicResult_t h{};
     int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
-        ltHandle, desc, lA, lB, lC, lC,
-        preference, 1, &h, &returnedResults));
+        ltHandle, desc, lA, lB, lC, lC, preference, 1, &h, &returnedResults));
     ++stats.heuristicQueries;
     if (returnedResults == 0) {
       if (!required)
         return nullptr;
       std::cerr << "[sofieBLAS] No suitable cuBLASLt algorithm found for "
                 << "transA=" << transA << " transB=" << transB
-                << " epilogue=" << epilogue
-                << " A=[" << kA.first << "x" << kA.second << "]"
+                << " epilogue=" << epilogue << " A=[" << kA.first << "x"
+                << kA.second << "]"
                 << " B=[" << kB.first << "x" << kB.second << "]\n";
       exit(EXIT_FAILURE);
     }
@@ -518,18 +531,17 @@ private:
   }
 
   void executeMatmul(cublasOperation_t transA, cublasOperation_t transB,
-                     cublasLtEpilogue_t epilogue,
-                     float alpha, const float *A, const float *B,
-                     float beta, const float *D_in, float *C_out,
-                     const void *bias_ptr,
+                     cublasLtEpilogue_t epilogue, float alpha, const float *A,
+                     const float *B, float beta, const float *D_in,
+                     float *C_out, const void *bias_ptr,
                      const std::pair<std::size_t, std::size_t> &kA,
                      const std::pair<std::size_t, std::size_t> &kB,
                      const std::pair<std::size_t, std::size_t> &kC) {
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     if (bias_ptr) {
       CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-          &bias_ptr, sizeof(bias_ptr)));
+          desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr,
+          sizeof(bias_ptr)));
     }
 
     // Resolve at this call site's declared envelope, so every runtime size it
@@ -554,13 +566,9 @@ private:
     auto lA = stampLayout(ROLE_A, kA);
     auto lB = stampLayout(ROLE_B, kB);
     auto lC = stampLayout(ROLE_C, kC);
-    CHECK_CUBLAS(cublasLtMatmul(
-        ltHandle, desc,
-        &alpha, A, lA,
-                B, lB,
-        &beta, D_in, lC,
-               C_out, lC,
-        &h->algo, d_workspace, workspaceSize, stream));
+    CHECK_CUBLAS(cublasLtMatmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
+                                D_in, lC, C_out, lC, &h->algo, d_workspace,
+                                workspaceSize, stream));
   }
 };
 

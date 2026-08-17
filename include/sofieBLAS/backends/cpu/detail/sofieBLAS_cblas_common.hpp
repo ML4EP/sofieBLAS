@@ -1,18 +1,14 @@
 #pragma once
 
+// Shared implementation for every CPU backend that exposes a standard CBLAS
+// API. The vendor-specific header (cblas.h / mkl.h / blis/cblas.h /
+// Accelerate.h) must already be included by the backend wrapper before this
+// file, since they all provide the same CBLAS symbols.
+
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
 
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
-
-#if defined(SOFIEBLAS_USE_MKL)
-#include <mkl.h>
-#elif defined(SOFIEBLAS_USE_OPENBLAS)
-#include <cblas.h>
-#else
-#error                                                                         \
-    "No CPU BLAS backend selected. Define SOFIEBLAS_USE_MKL or SOFIEBLAS_USE_OPENBLAS."
-#endif
 
 #include <cassert>
 #include <cmath>
@@ -57,12 +53,15 @@ public:
   }
 
   template <typename T, typename TIdx>
-  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
-                     unsigned int k, float alpha,
-                     alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &A,
-                     alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &B,
-                     float beta,
-                     alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void
+  matmul(char transa, char transb, unsigned int m, unsigned int n,
+         unsigned int k, float alpha,
+         alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+             &A,
+         alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+             &B,
+         float beta,
+         alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m)
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
@@ -74,9 +73,7 @@ public:
   }
 
   // C = alpha * op(A) * op(B) + beta * bias + bias_vec  (bias_vec broadcast per
-  // row) Matches the cuBLASLt EPILOGUE_BIAS semantics: the bias buffer serves
-  // as both the beta-scaled accumulator and provides the per-row bias vector
-  // (first m elements).
+  // row)
   template <typename T, typename TIdx>
   inline void
   gemm(char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
@@ -88,12 +85,10 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    // Step 1: C = alpha * op(A) * op(B) (beta=0 so C is fully overwritten)
     cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
                 static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
                 alpha, alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B),
                 ldb, 0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
-    // Step 2: C += beta * bias_matrix + bias_vec (per-row broadcast)
     float *c = alpaka::getPtrNative(C);
     const float *b = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
@@ -105,8 +100,10 @@ public:
   inline void
   gemm(char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
        float alpha,
-       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &A,
-       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &B,
+       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+           &A,
+       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+           &B,
        float beta,
        alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
        alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
@@ -141,13 +138,16 @@ public:
   }
 
   template <typename T, typename TIdx>
-  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &A,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &B,
-                       float beta,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void gemmrelu(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
     float *c = alpaka::getPtrNative(C);
     for (unsigned int i = 0; i < m * n; ++i)
@@ -172,13 +172,16 @@ public:
   }
 
   template <typename T, typename TIdx>
-  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &A,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const &B,
-                       float beta,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
-                       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
+  inline void gemmgelu(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+          &A,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> const
+          &B,
+      float beta,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
+      alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
     float *c = alpaka::getPtrNative(C);
     constexpr float kInvSqrt2 = 0.7071067811865476f;
@@ -186,13 +189,29 @@ public:
       c[i] *= 0.5f * (1.0f + std::erff(c[i] * kInvSqrt2));
   }
 
-  // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr via getPtrNative()
+  // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr
+  // via getPtrNative()
+  template <typename T>
+  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
+                     unsigned int k, float alpha, T const *A, T const *B,
+                     float beta, T *C) {
+    int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m)
+                                               : static_cast<int>(k);
+    int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
+                                               : static_cast<int>(n);
+    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                alpha, A, lda, B, ldb, beta, C, static_cast<int>(m));
+  }
+
   template <typename T>
   inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
                    unsigned int k, float alpha, T const *A, T const *B,
                    float beta, T *bias, T *C) {
-    int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m) : static_cast<int>(k);
-    int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k) : static_cast<int>(n);
+    int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m)
+                                               : static_cast<int>(k);
+    int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
+                                               : static_cast<int>(n);
     cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
                 static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
                 alpha, A, lda, B, ldb, 0.0f, C, static_cast<int>(m));
