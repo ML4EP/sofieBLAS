@@ -30,7 +30,25 @@ Backend selection happens entirely at compile time, in two steps:
 | NVIDIA GPU (cuBLASLt) | `ALPAKA_ACC_GPU_CUDA_ENABLED` | `alpaka::TagGpuCudaRt` |
 | AMD GPU (hipBLASLt) | `ALPAKA_ACC_GPU_HIP_ENABLED` | `alpaka::TagGpuHipRt` |
 
-`sofieBLAS/sofieBLAS.hpp` includes the matching backend header(s) for you based on these macros; nothing else needs to change in your source beyond picking the right tag. See `tests/CMakeLists.txt` for a working example that detects the available libraries and wires up a `test_cpu`, `test_cuda`, and `test_hip` target, each built against a different backend.
+`sofieBLAS/sofieBLAS.hpp` includes the matching backend header(s) for you based on these macros; nothing else needs to change in your source beyond picking the right tag.
+
+## Building tests and benchmarks
+
+sofieBLAS itself is header-only (`add_subdirectory`/`find_package(sofieBLAS)` gives you an `INTERFACE` target with no build step). Tests and benchmarks are opt-in via CMake options and auto-detect whichever backends are available on the machine for each backend target (`test_cpu`/`test_cuda`/`test_hip`, `bench_cpu`/`bench_cuda`/`bench_hip`) and is skipped if its dependency isn't found:
+
+```bash
+cmake -B build -S . -DSOFIEBLAS_BUILD_TESTS=ON -DSOFIEBLAS_BUILD_BENCHMARKS=ON
+cmake --build build -j"$(nproc)"
+
+# Run the correctness tests (matmul/gemm/gemmrelu/gemmgelu vs. a reference
+# implementation, per available backend)
+ctest --test-dir build --output-on-failure
+
+# Run the GEMM throughput benchmark
+./build/benchmark/bench_cuda -w 5 -n 20 --sizes 256,512,1024,2048,4096
+```
+
+`CPU_BLAS_LIB` (`OpenBLAS`/`MKL`/`BLIS`/`Accelerate`) and `CUDA_BASE`/`ROCM_BASE`/`ONEAPI_BASE`/`BLIS_BASE` are available as `-D` cache variables to point at non-default install locations; alpaka is picked up via `find_package(alpaka)` if already installed, otherwise fetched automatically. See `tests/CMakeLists.txt` and `benchmark/CMakeLists.txt` for the target definitions, and `cmake/SofieBLASBackends.cmake` for the shared backend-detection logic.
 
 ## Usage example
 

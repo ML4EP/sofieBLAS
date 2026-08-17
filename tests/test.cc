@@ -94,10 +94,6 @@ static void checkClose(const float *got, const float *expected, int n,
     ++gFailures;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers to fill test matrices
-// ---------------------------------------------------------------------------
-
 static void fillSeq(float *M, int n, float start = 1.f, float step = 1.f) {
   for (int i = 0; i < n; ++i)
     M[i] = start + static_cast<float>(i) * step;
