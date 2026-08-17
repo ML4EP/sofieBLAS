@@ -84,8 +84,8 @@ struct ShapeEnvelope {
 
 struct LayoutStats {
   std::size_t heuristicQueries = 0;
-  std::size_t envelopeRejects  = 0;  // envelope algorithm unusable at the call
-  std::size_t evictions        = 0;  // entries dropped to stay under the limit
+  std::size_t envelopeRejects = 0; // envelope algorithm unusable at the call
+  std::size_t evictions = 0;       // entries dropped to stay under the limit
 };
 
 class BlasCuda {
@@ -99,7 +99,8 @@ class BlasCuda {
   // One persistent layout descriptor per matrix role, re-stamped with the
   // runtime dimensions before each matmul. The descriptor is host-side metadata
   // consumed by cublasLtMatmul at the call, so a single object can be reused
-  // across shapes - this is what lets one Session serve dynamic (runtime) sizes.
+  // across shapes - this is what lets one Session serve dynamic (runtime)
+  // sizes.
   enum LayoutRole { ROLE_A = 0, ROLE_B = 1, ROLE_C = 2 };
   cublasLtMatrixLayout_t roleLayout[3] = {};
 
@@ -109,7 +110,7 @@ class BlasCuda {
   // list stays empty and the iterator is never read.
   struct CacheEntry {
     cublasLtMatmulHeuristicResult_t h{};
-    std::list<AlgoKey>::iterator    lru{};
+    std::list<AlgoKey>::iterator lru{};
   };
   std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
   std::list<AlgoKey> lruOrder;
@@ -127,7 +128,7 @@ class BlasCuda {
 
 public:
   const LayoutStats &layoutStats() const { return stats; }
-  std::size_t algoCacheSize()     const { return algoCache.size(); }
+  std::size_t algoCacheSize() const { return algoCache.size(); }
   void setAlgoCacheLimit(std::size_t n) { algoCacheLimit = n; }
 
   BlasCuda(const BlasCuda &) = delete;
@@ -190,9 +191,8 @@ public:
   // the largest dims the call site will ever use. Layouts are created lazily,
   // so nothing is registered here beyond the envelope and, with warmup on, the
   // algorithm resolved for it.
-  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k,
-                       std::size_t, std::size_t, std::size_t,
-                       char transa, char transb) {
+  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t,
+                       std::size_t, std::size_t, char transa, char transb) {
     const auto kA = layoutKeyA(transa, m, k);
     const auto kB = layoutKeyB(transb, k, n);
     const std::pair<std::size_t, std::size_t> kC{m, n};
@@ -418,10 +418,10 @@ private:
   // Resolve a matrix role's layout at the runtime dims: create the descriptor
   // once, then overwrite its dims in place on later calls. ld = rows (dense,
   // column-major, as the generated calls produce).
-  cublasLtMatrixLayout_t stampLayout(LayoutRole role,
-                                     const std::pair<std::size_t, std::size_t> &key) {
+  cublasLtMatrixLayout_t
+  stampLayout(LayoutRole role, const std::pair<std::size_t, std::size_t> &key) {
     const uint64_t rows = key.first, cols = key.second;
-    const int64_t  ld   = static_cast<int64_t>(key.first);
+    const int64_t ld = static_cast<int64_t>(key.first);
     cublasLtMatrixLayout_t &L = roleLayout[role];
     if (!L) {
       CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&L, CUDA_R_32F, rows, cols, ld));
@@ -452,12 +452,15 @@ private:
       // on it stops one call site's envelope from serving another's shapes.
       if (e.colsA != kA.second || e.rowsB != kB.first)
         continue;
-      if (e.rowsA < kA.first || e.colsB < kB.second ||
-          e.rowsC < kC.first || e.colsC < kC.second)
+      if (e.rowsA < kA.first || e.colsB < kB.second || e.rowsC < kC.first ||
+          e.colsC < kC.second)
         continue;
       const std::size_t ex = (e.rowsA - kA.first) + (e.colsA - kA.second) +
                              (e.rowsB - kB.first) + (e.colsB - kB.second);
-      if (ex < bestExcess) { bestExcess = ex; best = &e; }
+      if (ex < bestExcess) {
+        bestExcess = ex;
+        best = &e;
+      }
     }
     return best;
   }
@@ -531,7 +534,7 @@ private:
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     auto lA = stampLayout(ROLE_A, kA);
     auto lB = stampLayout(ROLE_B, kB);
-    auto lC = stampLayout(ROLE_C, kC);   // C and D share the same layout
+    auto lC = stampLayout(ROLE_C, kC); // C and D share the same layout
     cublasLtMatmulHeuristicResult_t h{};
     int returnedResults = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(

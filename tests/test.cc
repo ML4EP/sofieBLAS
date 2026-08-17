@@ -560,8 +560,9 @@ static void runCudaTests() {
 }
 
 // One instance used at many sizes, which is what a dynamic-shape model does.
-// earlier, any size other than the one registered at construction threw std::out_of_range from the layout lookup
-// so this is the case the rest of the suite never covered.
+// earlier, any size other than the one registered at construction threw
+// std::out_of_range from the layout lookup so this is the case the rest of the
+// suite never covered.
 static void runDynamicShapeTests() {
   std::cout << "\n=== CUDA Dynamic-Shape Tests ===\n";
 
@@ -586,9 +587,11 @@ static void runDynamicShapeTests() {
   fillSeq(A, MCAP * K, 0.5f, 0.25f);
   fillSeq(B, K * N, 1.f, 0.5f);
 
-  auto dA = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * K));
+  auto dA =
+      alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * K));
   auto dB = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(K * N));
-  auto dC = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * N));
+  auto dC =
+      alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * N));
   alpaka::memcpy(queue, dA, hA);
   alpaka::memcpy(queue, dB, hB);
   alpaka::wait(queue);
@@ -646,8 +649,9 @@ static void runDynamicShapeTests() {
     for (int m = MENV + 1; m <= MCAP; ++m) {
       cref.assign(static_cast<std::size_t>(m) * N, 0.f);
       refMatmul(cref.data(), A, B, m, N, K, 1.f, 0.f, false, false);
-      capped.matmul('N', 'N', static_cast<unsigned>(m), static_cast<unsigned>(N),
-                    static_cast<unsigned>(K), 1.f, dA, dB, 0.f, dC);
+      capped.matmul('N', 'N', static_cast<unsigned>(m),
+                    static_cast<unsigned>(N), static_cast<unsigned>(K), 1.f, dA,
+                    dB, 0.f, dC);
       alpaka::memcpy(queue, hC, dC);
       alpaka::wait(queue);
       for (std::size_t i = 0; i < cref.size(); ++i)
