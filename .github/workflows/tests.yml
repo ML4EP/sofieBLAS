@@ -86,6 +86,7 @@ jobs:
       valid: ${{ steps.parse.outputs.valid }}
       flavor: ${{ steps.parse.outputs.flavor }}
       valid_flavors: ${{ steps.parse.outputs.valid_flavors }}
+      backend: ${{ steps.parse.outputs.backend }}
     steps:
       - name: React to trigger comment
         if: github.event_name == 'issue_comment'
@@ -103,11 +104,12 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            // default flavor keyed by name -> actual self-hosted runner label
             const flavors = {
-              l40s: 'ml4ep-l40s',
-              h100: 'ml4ep-h100',
-              'h100-47gb': 'ml4ep-h100-47gb',
+              l40s: { runner: 'ml4ep-l40s', backend: 'cuda' },
+              h100: { runner: 'ml4ep-h100', backend: 'cuda' },
+              'h100-47gb': { runner: 'ml4ep-h100-47gb', backend: 'cuda' },
+              w7900: { runner: 'ml4ep-w7900', backend: 'hip' },
+              mi300x: { runner: 'ml4ep-mi300x', backend: 'hip' },
             };
             let flavor = 'l40s';
             let valid = true;
@@ -120,7 +122,8 @@ jobs:
             }
             core.setOutput('flavor', flavor);
             core.setOutput('valid', String(valid));
-            core.setOutput('runner_label', valid ? flavors[flavor] : '');
+            core.setOutput('runner_label', valid ? flavors[flavor].runner : '');
+            core.setOutput('backend', valid ? flavors[flavor].backend : '');
             core.setOutput('valid_flavors', Object.keys(flavors).join(', '));
       - name: Post run link
         if: github.event_name == 'issue_comment'
@@ -145,8 +148,13 @@ jobs:
       options: --user 0:0
     timeout-minutes: 45
     steps:
-      - name: GPU check
+      - name: GPU check (NVIDIA)
+        if: needs.parse-command.outputs.backend == 'cuda'
         run: nvidia-smi
+
+      - name: GPU check (AMD)
+        if: needs.parse-command.outputs.backend == 'hip'
+        run: rocm-smi
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -157,16 +165,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_CACHE }}
-          key: cmake-deps-gpu-${{ hashFiles('cmake/SofieBLASBackends.cmake') }}
-          restore-keys: cmake-deps-gpu-
+          key: cmake-deps-gpu-${{ needs.parse-command.outputs.backend }}-${{ hashFiles('cmake/SofieBLASBackends.cmake') }}
+          restore-keys: cmake-deps-gpu-${{ needs.parse-command.outputs.backend }}-
 
       - name: Configure
+        env:
+          BACKEND: ${{ needs.parse-command.outputs.backend }}
         run: |
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DSOFIEBLAS_BUILD_TESTS=ON \
             -DSOFIEBLAS_BUILD_BENCHMARKS=ON \
             -DCMAKE_CUDA_ARCHITECTURES=native \
+            -DCMAKE_HIP_ARCHITECTURES=native \
+            "-DSOFIEBLAS_ENABLE_CUDA=$([ "$BACKEND" = "cuda" ] && echo ON || echo OFF)" \
+            "-DSOFIEBLAS_ENABLE_HIP=$([ "$BACKEND" = "hip" ] && echo ON || echo OFF)" \
             "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}"
 
       - name: Build
@@ -174,7 +187,7 @@ jobs:
 
       - name: Run GPU tests
         working-directory: build
-        run: ctest --output-on-failure -j"$(nproc)" -R '\.(cuda|hip)(\.|$)'
+        run: ctest --output-on-failure -j"$(nproc)" -R "\.${{ needs.parse-command.outputs.backend }}(\.|\$)"
 
       - name: Upload test log
         if: always()

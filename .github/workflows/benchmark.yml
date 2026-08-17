@@ -48,6 +48,7 @@ jobs:
       valid: ${{ steps.parse.outputs.valid }}
       flavor: ${{ steps.parse.outputs.flavor }}
       valid_flavors: ${{ steps.parse.outputs.valid_flavors }}
+      backend: ${{ steps.parse.outputs.backend }}
     steps:
       - name: React to trigger comment
         if: github.event_name == 'issue_comment'
@@ -65,11 +66,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            // default flavor keyed by name -> actual self-hosted runner label
+            // default flavor keyed by name -> { self-hosted runner label, GPU backend }
             const flavors = {
-              l40s: 'ml4ep-l40s',
-              h100: 'ml4ep-h100',
-              'h100-47gb': 'ml4ep-h100-47gb',
+              l40s: { runner: 'ml4ep-l40s', backend: 'cuda' },
+              h100: { runner: 'ml4ep-h100', backend: 'cuda' },
+              'h100-47gb': { runner: 'ml4ep-h100-47gb', backend: 'cuda' },
+              w7900: { runner: 'ml4ep-w7900', backend: 'hip' },
+              mi300x: { runner: 'ml4ep-mi300x', backend: 'hip' },
             };
             let flavor = 'l40s';
             let valid = true;
@@ -82,7 +85,8 @@ jobs:
             }
             core.setOutput('flavor', flavor);
             core.setOutput('valid', String(valid));
-            core.setOutput('runner_label', valid ? flavors[flavor] : '');
+            core.setOutput('runner_label', valid ? flavors[flavor].runner : '');
+            core.setOutput('backend', valid ? flavors[flavor].backend : '');
             core.setOutput('valid_flavors', Object.keys(flavors).join(', '));
       - name: Post run link
         if: github.event_name == 'issue_comment'
@@ -106,8 +110,13 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: GPU check
+      - name: GPU check (NVIDIA)
+        if: needs.parse-command.outputs.backend == 'cuda'
         run: nvidia-smi
+
+      - name: GPU check (AMD)
+        if: needs.parse-command.outputs.backend == 'hip'
+        run: rocm-smi
 
       - name: Resolve PR info
         id: pr
@@ -141,24 +150,29 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_CACHE }}
-          key: cmake-deps-bench-${{ hashFiles('sofieblas-pr/cmake/SofieBLASBackends.cmake') }}
-          restore-keys: cmake-deps-bench-
+          key: cmake-deps-bench-${{ needs.parse-command.outputs.backend }}-${{ hashFiles('sofieblas-pr/cmake/SofieBLASBackends.cmake') }}
+          restore-keys: cmake-deps-bench-${{ needs.parse-command.outputs.backend }}-
 
       - name: Configure PR build
+        env:
+          BACKEND: ${{ needs.parse-command.outputs.backend }}
         run: |
           cmake -B sofieblas-pr/build -S sofieblas-pr \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DSOFIEBLAS_BUILD_BENCHMARKS=ON \
             -DCMAKE_CUDA_ARCHITECTURES=native \
+            -DCMAKE_HIP_ARCHITECTURES=native \
+            "-DSOFIEBLAS_ENABLE_CUDA=$([ "$BACKEND" = "cuda" ] && echo ON || echo OFF)" \
+            "-DSOFIEBLAS_ENABLE_HIP=$([ "$BACKEND" = "hip" ] && echo ON || echo OFF)" \
             "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}"
 
       - name: Build PR benchmark
-        run: cmake --build sofieblas-pr/build --target bench_cuda -j"$(nproc)"
+        run: cmake --build sofieblas-pr/build --target "bench_${{ needs.parse-command.outputs.backend }}" -j"$(nproc)"
 
       - name: Run PR benchmark
         working-directory: sofieblas-pr/build/benchmark
         run: |
-          ./bench_cuda \
+          "./bench_${{ needs.parse-command.outputs.backend }}" \
             -w "${{ env.BENCH_WARMUP }}" \
             -n "${{ env.BENCH_ITERS }}" \
             --sizes "${{ env.BENCH_SIZES }}" \
@@ -177,22 +191,27 @@ jobs:
 
       - name: Configure base build
         if: github.event_name == 'issue_comment' && steps.base_support.outputs.supported == 'true'
+        env:
+          BACKEND: ${{ needs.parse-command.outputs.backend }}
         run: |
           cmake -B sofieblas-main/build -S sofieblas-main \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DSOFIEBLAS_BUILD_BENCHMARKS=ON \
             -DCMAKE_CUDA_ARCHITECTURES=native \
+            -DCMAKE_HIP_ARCHITECTURES=native \
+            "-DSOFIEBLAS_ENABLE_CUDA=$([ "$BACKEND" = "cuda" ] && echo ON || echo OFF)" \
+            "-DSOFIEBLAS_ENABLE_HIP=$([ "$BACKEND" = "hip" ] && echo ON || echo OFF)" \
             "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}"
 
       - name: Build base benchmark
         if: github.event_name == 'issue_comment' && steps.base_support.outputs.supported == 'true'
-        run: cmake --build sofieblas-main/build --target bench_cuda -j"$(nproc)"
+        run: cmake --build sofieblas-main/build --target "bench_${{ needs.parse-command.outputs.backend }}" -j"$(nproc)"
 
       - name: Run base benchmark
         if: github.event_name == 'issue_comment' && steps.base_support.outputs.supported == 'true'
         working-directory: sofieblas-main/build/benchmark
         run: |
-          ./bench_cuda \
+          "./bench_${{ needs.parse-command.outputs.backend }}" \
             -w "${{ env.BENCH_WARMUP }}" \
             -n "${{ env.BENCH_ITERS }}" \
             --sizes "${{ env.BENCH_SIZES }}" \
