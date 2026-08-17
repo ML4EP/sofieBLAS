@@ -102,6 +102,7 @@ jobs:
     needs: parse-command
     if: needs.parse-command.outputs.valid == 'true'
     runs-on: ${{ needs.parse-command.outputs.runner_label }}
+    container: registry.cern.ch/ngt/lxplus-like:9
     timeout-minutes: 60
 
     steps:

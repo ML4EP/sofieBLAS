@@ -24,12 +24,16 @@ env:
 jobs:
   cpu-tests:
     name: CPU Unit Tests
-    if: github.event_name != 'issue_comment'
+    if: |
+      github.event_name != 'issue_comment' ||
+      github.event.issue.pull_request != null
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/merge', github.event.issue.number) || github.ref }}
 
       - name: Install OpenBLAS
         run: |
@@ -136,6 +140,9 @@ jobs:
     needs: parse-command
     if: needs.parse-command.outputs.valid == 'true'
     runs-on: ${{ needs.parse-command.outputs.runner_label }}
+    container:
+      image: registry.cern.ch/ngt/lxplus-like:9
+      options: --user 0:0
     timeout-minutes: 45
     steps:
       - name: GPU check
