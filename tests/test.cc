@@ -559,10 +559,6 @@ static void runCudaTests() {
   }
 }
 
-// One instance used at many sizes, which is what a dynamic-shape model does.
-// earlier, any size other than the one registered at construction threw
-// std::out_of_range from the layout lookup so this is the case the rest of the
-// suite never covered.
 static void runDynamicShapeTests() {
   std::cout << "\n=== CUDA Dynamic-Shape Tests ===\n";
 
@@ -574,8 +570,6 @@ static void runDynamicShapeTests() {
   alpaka::PlatformCpu hostPlatform{};
   auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
 
-  // Buffers hold MCAP rows while the call site declares MENV, so sizes above
-  // MENV stay in bounds and exercise the path where no envelope covers them.
   constexpr int MCAP = 96, MENV = 64, N = 3, K = 5;
 
   auto hA = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(MCAP * K));
@@ -596,8 +590,6 @@ static void runDynamicShapeTests() {
   alpaka::memcpy(queue, dB, hB);
   alpaka::wait(queue);
 
-  // Declare the call site's largest shape, as a generated Session constructor
-  // does with its own arguments.
   blas.addLayoutConfig(MENV, N, K, ldaFor('N', MENV, K), ldbFor('N', K, N),
                        MENV, 'N', 'N');
 
@@ -612,12 +604,9 @@ static void runDynamicShapeTests() {
     checkClose(C, ref.data(), m * N, name);
   };
 
-  // At, below and above the declared envelope, all on one instance.
   for (int m : {MENV, 37, 8, 51, 1, MENV, MCAP})
     runAt(m, "cuda::dynamic m=" + std::to_string(m));
 
-  // The cache must not grow one entry per size. Entries are added only where
-  // the envelope's algorithm is rejected. Keying by shape fails only here.
   const int nSizes = MENV - 1;
   const std::size_t cacheBefore = blas.algoCacheSize();
   const std::size_t rejBefore = blas.layoutStats().envelopeRejects;
@@ -638,8 +627,6 @@ static void runDynamicShapeTests() {
     ++gFailures;
   }
 
-  // With a limit set, shapes above the envelope are resolved individually and
-  // the cache must stay at the limit rather than growing per shape.
   {
     sofieBLAS<alpaka::TagGpuCudaRt> capped(queue, 8);
     capped.addLayoutConfig(MENV, N, K, ldaFor('N', MENV, K), ldbFor('N', K, N),
@@ -671,8 +658,6 @@ static void runDynamicShapeTests() {
     }
   }
 
-  // The constructor resolves every declared envelope, so a size it covers must
-  // not trigger a search. Only a rejected envelope algorithm may.
   const std::size_t searched =
       blas.layoutStats().heuristicQueries - searchBefore;
   if (searched <= rejected) {
