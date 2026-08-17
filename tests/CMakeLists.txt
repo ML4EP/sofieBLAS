@@ -38,7 +38,7 @@ if(SOFIEBLAS_CUDA_ENABLED)
 
   add_test(NAME sofieBLAS.cuda COMMAND test_cuda)
 else()
-  message(STATUS "sofieBLAS tests: skipping test_cuda (no CUDA compiler found)")
+  message(VERBOSE "sofieBLAS tests: skipping test_cuda (CUDA backend not enabled)")
 endif()
 
 if(SOFIEBLAS_HIP_ENABLED)
@@ -58,5 +58,5 @@ if(SOFIEBLAS_HIP_ENABLED)
 
   add_test(NAME sofieBLAS.hip COMMAND test_hip)
 else()
-  message(STATUS "sofieBLAS tests: skipping test_hip (no HIP compiler found)")
+  message(VERBOSE "sofieBLAS tests: skipping test_hip (HIP backend not enabled)")
 endif()

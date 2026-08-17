@@ -8,10 +8,6 @@ on:
     types: [created]
   workflow_dispatch:
 
-concurrency:
-  group: tests-${{ github.event.issue.number || github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   pull-requests: write
@@ -26,7 +22,14 @@ jobs:
     name: CPU Unit Tests
     if: |
       github.event_name != 'issue_comment' ||
-      github.event.issue.pull_request != null
+      (
+        github.event.issue.pull_request != null &&
+        !startsWith(github.event.comment.body, '/runtest') &&
+        !startsWith(github.event.comment.body, '/runbenchmark')
+      )
+    concurrency:
+      group: cpu-tests-${{ github.event.issue.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -53,6 +56,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DSOFIEBLAS_BUILD_TESTS=ON \
             -DSOFIEBLAS_BUILD_BENCHMARKS=ON \
+            -DSOFIEBLAS_ENABLE_CUDA=OFF \
+            -DSOFIEBLAS_ENABLE_HIP=OFF \
             "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}"
 
       - name: Build
@@ -142,6 +147,9 @@ jobs:
     name: GPU Unit Tests
     needs: parse-command
     if: needs.parse-command.outputs.valid == 'true'
+    concurrency:
+      group: gpu-tests-${{ needs.parse-command.outputs.flavor }}-${{ github.event.issue.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ${{ needs.parse-command.outputs.runner_label }}
     container:
       image: registry.cern.ch/ngt/lxplus-like:9

@@ -1,8 +1,3 @@
-# Built via the root CMakeLists.txt with -DSOFIEBLAS_BUILD_BENCHMARKS=ON,
-# which already ran cmake/SofieBLASBackends.cmake to populate
-# SOFIEBLAS_CPU_BLAS_*, SOFIEBLAS_CUDA_ENABLED, SOFIEBLAS_HIP_ENABLED and the
-# alpaka::alpaka target.
-
 set(CXXFLAGS -O3 -DALPAKA_HAS_STD_ATOMIC_REF)
 set(CXX_HOST_FLAGS -fPIC -pthread)
 set(CXX_CUDA_FLAGS -Wno-deprecated-gpu-targets --extended-lambda --expt-relaxed-constexpr)
@@ -49,7 +44,7 @@ if(SOFIEBLAS_CUDA_ENABLED)
       COMMAND bench_cuda -w 1 -n 1 --sizes 64,128)
   endif()
 else()
-  message(STATUS "sofieBLAS benchmark: skipping bench_cuda (no CUDA compiler found)")
+  message(VERBOSE "sofieBLAS benchmark: skipping bench_cuda (CUDA backend not enabled)")
 endif()
 
 if(SOFIEBLAS_HIP_ENABLED)
@@ -72,5 +67,5 @@ if(SOFIEBLAS_HIP_ENABLED)
       COMMAND bench_hip -w 1 -n 1 --sizes 64,128)
   endif()
 else()
-  message(STATUS "sofieBLAS benchmark: skipping bench_hip (no HIP compiler found)")
+  message(VERBOSE "sofieBLAS benchmark: skipping bench_hip (HIP backend not enabled)")
 endif()
