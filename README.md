@@ -96,7 +96,22 @@ sofieBLAS<alpaka::TagGpuHipRt> blas(queue);
 blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
-The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addLayoutConfig` (used to pre-register cuBLASLt/hipBLASLt matrix layouts for a given shape before the first `matmul`/`gemm` call on that shape).
+The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addLayoutConfig` (declares a call site's shape ahead of the first call; on CUDA this feeds the algorithm cache described below, on HIP it pre-registers the matrix layouts for that shape).
+
+## Dynamic GEMM shapes and the algorithm cache (CUDA)
+
+One `BlasCuda` instance serves GEMM calls at sizes that vary at runtime. Matrix layouts are not tied to a shape: each call stamps its dimensions into a shared per-role descriptor right before the multiply.
+
+cuBLASLt algorithm selection is cached. `addLayoutConfig(m, n, k, lda, ldb, ldc, transa, transb)` declares the largest shape a call site will use (its envelope) and resolves the algorithm for it once, up front. Any later call at a size covered by an envelope reuses that entry, so sweeping sizes does not re-query the heuristic or grow the cache. A call with no covering envelope is resolved at its exact shape and cached per shape, and if an envelope's algorithm cannot run a particular size the call falls back to exact-shape resolution.
+
+The cache is unbounded by default. Pass a limit at construction to cap it with LRU eviction:
+
+```cpp
+sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);       // unbounded cache (default)
+sofieBLAS<alpaka::TagGpuCudaRt> capped(queue, 32); // at most 32 entries, LRU eviction
+```
+
+`algoCacheSize()` returns the current entry count and `layoutStats()` returns counters (`heuristicQueries`, `envelopeRejects`, `evictions`) for inspecting cache behaviour.
 
 
 ## Contributing
