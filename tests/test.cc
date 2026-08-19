@@ -890,6 +890,116 @@ static void runHipTests() {
   }
 }
 
+static void runHipDynamicShapeTests() {
+  std::cout << "\n=== HIP Dynamic-Shape Tests ===\n";
+
+  alpaka::PlatformHipRt platform{};
+  auto dev = alpaka::getDevByIdx(platform, 0u);
+  alpaka::Queue<alpaka::DevHipRt, alpaka::NonBlocking> queue{dev};
+  sofieBLAS<alpaka::TagGpuHipRt> blas(queue);
+
+  alpaka::PlatformCpu hostPlatform{};
+  auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
+
+  constexpr int MCAP = 96, MENV = 64, N = 3, K = 5;
+
+  auto hA = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(MCAP * K));
+  auto hB = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(K * N));
+  auto hC = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(MCAP * N));
+  float *A = alpaka::getPtrNative(hA);
+  float *B = alpaka::getPtrNative(hB);
+  float *C = alpaka::getPtrNative(hC);
+  fillSeq(A, MCAP * K, 0.5f, 0.25f);
+  fillSeq(B, K * N, 1.f, 0.5f);
+
+  auto dA =
+      alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * K));
+  auto dB = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(K * N));
+  auto dC =
+      alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(MCAP * N));
+  alpaka::memcpy(queue, dA, hA);
+  alpaka::memcpy(queue, dB, hB);
+  alpaka::wait(queue);
+
+  blas.addLayoutConfig(MENV, N, K, ldaFor('N', MENV, K), ldbFor('N', K, N),
+                       MENV, 'N', 'N');
+
+  std::vector<float> ref;
+  auto runAt = [&](int m, const std::string &name) {
+    ref.assign(static_cast<std::size_t>(m) * N, 0.f);
+    refMatmul(ref.data(), A, B, m, N, K, 1.f, 0.f, false, false);
+    blas.matmul('N', 'N', static_cast<unsigned>(m), static_cast<unsigned>(N),
+                static_cast<unsigned>(K), 1.f, dA, dB, 0.f, dC);
+    alpaka::memcpy(queue, hC, dC);
+    alpaka::wait(queue);
+    checkClose(C, ref.data(), m * N, name);
+  };
+
+  for (int m : {MENV, 37, 8, 51, 1, MENV, MCAP})
+    runAt(m, "hip::dynamic m=" + std::to_string(m));
+
+  const int nSizes = MENV - 1;
+  const std::size_t cacheBefore = blas.algoCacheSize();
+  const std::size_t rejBefore = blas.layoutStats().envelopeRejects;
+  const std::size_t searchBefore = blas.layoutStats().heuristicQueries;
+  for (int m = 2; m <= MENV; ++m)
+    blas.matmul('N', 'N', static_cast<unsigned>(m), static_cast<unsigned>(N),
+                static_cast<unsigned>(K), 1.f, dA, dB, 0.f, dC);
+  alpaka::wait(queue);
+  const std::size_t added = blas.algoCacheSize() - cacheBefore;
+  const std::size_t rejected = blas.layoutStats().envelopeRejects - rejBefore;
+
+  std::cout << "        " << nSizes << " sizes added " << added
+            << " cache entries, " << rejected << " rejected\n";
+  if (added < static_cast<std::size_t>(nSizes)) {
+    std::cout << "  PASS  hip::cache bounded\n";
+  } else {
+    std::cerr << "  FAIL [hip::cache bounded] one entry per size\n";
+    ++gFailures;
+  }
+
+  {
+    sofieBLAS<alpaka::TagGpuHipRt> capped(queue, 8);
+    capped.addLayoutConfig(MENV, N, K, ldaFor('N', MENV, K), ldbFor('N', K, N),
+                           MENV, 'N', 'N');
+    std::vector<float> cref;
+    float worst = 0.f;
+    for (int m = MENV + 1; m <= MCAP; ++m) {
+      cref.assign(static_cast<std::size_t>(m) * N, 0.f);
+      refMatmul(cref.data(), A, B, m, N, K, 1.f, 0.f, false, false);
+      capped.matmul('N', 'N', static_cast<unsigned>(m),
+                    static_cast<unsigned>(N), static_cast<unsigned>(K), 1.f, dA,
+                    dB, 0.f, dC);
+      alpaka::memcpy(queue, hC, dC);
+      alpaka::wait(queue);
+      for (std::size_t i = 0; i < cref.size(); ++i)
+        worst = std::max(worst, std::abs(C[i] - cref[i]));
+    }
+    std::cout << "        limit=8: " << capped.algoCacheSize() << " entries, "
+              << capped.layoutStats().evictions << " evictions over "
+              << (MCAP - MENV) << " above-envelope sizes, worst err " << worst
+              << "\n";
+    if (capped.algoCacheSize() <= 8 && worst < 1e-3f) {
+      std::cout << "  PASS  hip::cache limit honoured\n";
+    } else {
+      std::cerr << "  FAIL [hip::cache limit honoured] "
+                << capped.algoCacheSize() << " entries, worst err " << worst
+                << "\n";
+      ++gFailures;
+    }
+  }
+
+  const std::size_t searched =
+      blas.layoutStats().heuristicQueries - searchBefore;
+  if (searched <= rejected) {
+    std::cout << "  PASS  hip::no search during inference\n";
+  } else {
+    std::cerr << "  FAIL [hip::no search during inference] " << searched
+              << " searches, only " << rejected << " explained by rejects\n";
+    ++gFailures;
+  }
+}
+
 #endif // ALPAKA_ACC_GPU_HIP_ENABLED
 
 // ---------------------------------------------------------------------------
@@ -906,6 +1016,7 @@ int main() {
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
   runHipTests();
+  runHipDynamicShapeTests();
 #endif
 
   std::cout << "\n";

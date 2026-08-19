@@ -5,13 +5,17 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <list>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
 #include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 #include <hipblaslt/hipblaslt.h>
 
 #define CHECK_HIP(err)                                                         \
@@ -29,22 +33,6 @@
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
-
-struct PairHash {
-  std::size_t
-  operator()(const std::pair<std::size_t, std::size_t> &p) const noexcept {
-    std::size_t h1 = std::hash<std::size_t>{}(p.first);
-    std::size_t h2 = std::hash<std::size_t>{}(p.second);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
-  }
-};
-
-struct PairEq {
-  bool operator()(const std::pair<std::size_t, std::size_t> &a,
-                  const std::pair<std::size_t, std::size_t> &b) const noexcept {
-    return a.first == b.first && a.second == b.second;
-  }
-};
 
 struct DescKey {
   int transA; // HIPBLAS_OP_N / HIPBLAS_OP_T encoded as int
@@ -66,8 +54,8 @@ struct DescKeyHash {
 
 struct AlgoKey {
   DescKey dk;
-  std::size_t rowsA, colsA; // physical dimensions of A in layoutStore
-  std::size_t rowsB, colsB; // physical dimensions of B in layoutStore
+  std::size_t rowsA, colsA;
+  std::size_t rowsB, colsB;
   bool operator==(const AlgoKey &o) const noexcept {
     return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
            rowsB == o.rowsB && colsB == o.colsB;
@@ -89,6 +77,16 @@ struct AlgoKeyHash {
   }
 };
 
+struct ShapeEnvelope {
+  std::size_t rowsA, colsA, rowsB, colsB, rowsC, colsC;
+};
+
+struct LayoutStats {
+  std::size_t heuristicQueries = 0;
+  std::size_t envelopeRejects = 0;
+  std::size_t evictions = 0;
+};
+
 class BlasHip {
   hipblasLtHandle_t ltHandle = nullptr;
   hipblasHandle_t handle = nullptr;
@@ -97,22 +95,36 @@ class BlasHip {
   size_t workspaceSize = 1u << 25; // 32 MB
   hipStream_t stream = nullptr;
 
-  std::unordered_map<std::pair<std::size_t, std::size_t>,
-                     hipblasLtMatrixLayout_t, PairHash, PairEq>
-      layoutStore;
+  enum LayoutRole { ROLE_A = 0, ROLE_B = 1, ROLE_C = 2 };
+  hipblasLtMatrixLayout_t roleLayout[3] = {};
 
   std::unordered_map<DescKey, hipblasLtMatmulDesc_t, DescKeyHash> descStore;
 
-  std::unordered_map<AlgoKey, hipblasLtMatmulHeuristicResult_t, AlgoKeyHash>
-      algoCache;
+  // algo cache entry
+  struct CacheEntry {
+    hipblasLtMatmulHeuristicResult_t h{};
+    std::list<AlgoKey>::iterator lru{};
+  };
+  std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
+  std::list<AlgoKey> lruOrder;
+  // 0 = unbounded
+  std::size_t algoCacheLimit = 0;
+
+  std::vector<ShapeEnvelope> envelopes;
+
+  LayoutStats stats;
 
 public:
+  const LayoutStats &layoutStats() const { return stats; }
+  std::size_t algoCacheSize() const { return algoCache.size(); }
+
   BlasHip(const BlasHip &) = delete;
   BlasHip &operator=(const BlasHip &) = delete;
   BlasHip(BlasHip &&) = delete;
   BlasHip &operator=(BlasHip &&) = delete;
 
-  BlasHip(alpaka::QueueHipRtNonBlocking &queue) : m_queue{queue} {
+  BlasHip(alpaka::QueueHipRtNonBlocking &queue, std::size_t algoCacheLimit_ = 0)
+      : algoCacheLimit{algoCacheLimit_}, m_queue{queue} {
     stream = static_cast<hipStream_t>(m_queue.getNativeHandle());
 
     CHECK_HIPBLAS(hipblasLtCreate(&ltHandle));
@@ -128,9 +140,9 @@ public:
   }
 
   ~BlasHip() {
-    for (auto &[key, layout] : layoutStore)
-      if (layout)
-        hipblasLtMatrixLayoutDestroy(layout);
+    for (auto L : roleLayout)
+      if (L)
+        hipblasLtMatrixLayoutDestroy(L);
     for (auto &[key, desc] : descStore)
       if (desc)
         hipblasLtMatmulDescDestroy(desc);
@@ -160,18 +172,21 @@ public:
     }
   }
 
-  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k,
-                       std::size_t lda, std::size_t ldb, std::size_t ldc,
-                       char transa, char transb) {
-    if (transa == 'N' || transa == 'n')
-      checkAndAddLayout(m, k, lda);
-    else
-      checkAndAddLayout(k, m, lda);
-    if (transb == 'N' || transb == 'n')
-      checkAndAddLayout(k, n, ldb);
-    else
-      checkAndAddLayout(n, k, ldb);
-    checkAndAddLayout(m, n, ldc);
+  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t,
+                       std::size_t, std::size_t, char transa, char transb) {
+    const auto kA = layoutKeyA(transa, m, k);
+    const auto kB = layoutKeyB(transb, k, n);
+    const std::pair<std::size_t, std::size_t> kC{m, n};
+    envelopes.push_back({kA.first, kA.second, kB.first, kB.second, m, n});
+
+    const hipblasOperation_t tA = charToHipBlasTranspose(transa);
+    const hipblasOperation_t tB = charToHipBlasTranspose(transb);
+    const hipblasLtEpilogue_t eps[] = {HIPBLASLT_EPILOGUE_DEFAULT,
+                                       HIPBLASLT_EPILOGUE_BIAS,
+                                       HIPBLASLT_EPILOGUE_RELU_BIAS};
+    for (hipblasLtEpilogue_t ep : eps) {
+      getOrComputeAlgo(tA, tB, ep, kA, kB, kC, /*required=*/false);
+    }
   }
 
   template <typename T, typename TIdx>
@@ -377,14 +392,62 @@ private:
                                           : std::make_pair(n, k);
   }
 
-  void checkAndAddLayout(std::size_t rows, std::size_t cols, std::size_t ld) {
-    auto key = std::make_pair(rows, cols);
-    if (layoutStore.find(key) == layoutStore.end()) {
-      hipblasLtMatrixLayout_t layout = nullptr;
-      CHECK_HIPBLAS(
-          hipblasLtMatrixLayoutCreate(&layout, HIP_R_32F, rows, cols, ld));
-      layoutStore.emplace(key, layout);
+  hipblasLtMatrixLayout_t
+  stampLayout(LayoutRole role, const std::pair<std::size_t, std::size_t> &key) {
+    const uint64_t rows = key.first, cols = key.second;
+    const int64_t ld = static_cast<int64_t>(key.first);
+    hipblasLtMatrixLayout_t &L = roleLayout[role];
+    if (!L) {
+      CHECK_HIPBLAS(hipblasLtMatrixLayoutCreate(&L, HIP_R_32F, rows, cols, ld));
+    } else {
+      CHECK_HIPBLAS(hipblasLtMatrixLayoutSetAttribute(
+          L, HIPBLASLT_MATRIX_LAYOUT_ROWS, &rows, sizeof(rows)));
+      CHECK_HIPBLAS(hipblasLtMatrixLayoutSetAttribute(
+          L, HIPBLASLT_MATRIX_LAYOUT_COLS, &cols, sizeof(cols)));
+      CHECK_HIPBLAS(hipblasLtMatrixLayoutSetAttribute(
+          L, HIPBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
     }
+    return L;
+  }
+
+  const ShapeEnvelope *
+  findEnvelope(const std::pair<std::size_t, std::size_t> &kA,
+               const std::pair<std::size_t, std::size_t> &kB,
+               const std::pair<std::size_t, std::size_t> &kC) const {
+    const ShapeEnvelope *best = nullptr;
+    std::size_t bestExcess = std::numeric_limits<std::size_t>::max();
+    for (const auto &e : envelopes) {
+      if (e.colsA != kA.second || e.rowsB != kB.first)
+        continue;
+      if (e.rowsA < kA.first || e.colsB < kB.second || e.rowsC < kC.first ||
+          e.colsC < kC.second)
+        continue;
+      const std::size_t ex = (e.rowsA - kA.first) + (e.colsA - kA.second) +
+                             (e.rowsB - kB.first) + (e.colsB - kB.second);
+      if (ex < bestExcess) {
+        bestExcess = ex;
+        best = &e;
+      }
+    }
+    return best;
+  }
+
+  bool algoUsable(hipblasLtMatmulDesc_t desc, const hipblasLtMatmulAlgo_t &algo,
+                  const std::pair<std::size_t, std::size_t> &kA,
+                  const std::pair<std::size_t, std::size_t> &kB,
+                  const std::pair<std::size_t, std::size_t> &kC) {
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);
+    // hipBLASLt has no hipblasLtMatmulAlgoCheck; the ext API rewrites the algo
+    // it is handed, so probe a copy.
+    hipblasLtMatmulAlgo_t probe = algo;
+    const float alpha = 1.f, beta = 0.f;
+    std::size_t ws = 0;
+    return hipblaslt_ext::matmulIsAlgoSupported(ltHandle, desc, &alpha, lA, lB,
+                                                &beta, lC, lC, probe,
+                                                ws) == HIPBLAS_STATUS_SUCCESS &&
+           ws <= workspaceSize;
   }
 
   hipblasLtMatmulDesc_t &getOrCreateDesc(hipblasOperation_t transA,
@@ -414,29 +477,37 @@ private:
     return descStore.at(key);
   }
 
-  hipblasLtMatmulHeuristicResult_t &
+  hipblasLtMatmulHeuristicResult_t *
   getOrComputeAlgo(hipblasOperation_t transA, hipblasOperation_t transB,
                    hipblasLtEpilogue_t epilogue,
                    const std::pair<std::size_t, std::size_t> &kA,
                    const std::pair<std::size_t, std::size_t> &kB,
-                   const std::pair<std::size_t, std::size_t> &kC) {
+                   const std::pair<std::size_t, std::size_t> &kC,
+                   bool required = true) {
     AlgoKey key{{(int)transA, (int)transB, (int)epilogue},
                 kA.first,
                 kA.second,
                 kB.first,
                 kB.second};
     auto it = algoCache.find(key);
-    if (it != algoCache.end())
-      return it->second;
+    if (it != algoCache.end()) {
+      if (algoCacheLimit)
+        lruOrder.splice(lruOrder.begin(), lruOrder, it->second.lru);
+      return &it->second.h;
+    }
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);
     hipblasLtMatmulHeuristicResult_t h{};
     int returnedResults = 0;
     CHECK_HIPBLAS(hipblasLtMatmulAlgoGetHeuristic(
-        ltHandle, desc, layoutStore.at(kA), layoutStore.at(kB),
-        layoutStore.at(kC), layoutStore.at(kC), preference, 1, &h,
-        &returnedResults));
+        ltHandle, desc, lA, lB, lC, lC, preference, 1, &h, &returnedResults));
+    ++stats.heuristicQueries;
     if (returnedResults == 0) {
+      if (!required)
+        return nullptr;
       std::cerr << "[sofieBLAS] No suitable hipBLASLt algorithm found for "
                 << "transA=" << transA << " transB=" << transB
                 << " epilogue=" << epilogue << " A=[" << kA.first << "x"
@@ -444,8 +515,17 @@ private:
                 << " B=[" << kB.first << "x" << kB.second << "]\n";
       exit(EXIT_FAILURE);
     }
-    algoCache.emplace(key, h);
-    return algoCache.at(key);
+    auto ins = algoCache.emplace(key, CacheEntry{h, {}}).first;
+    if (algoCacheLimit) {
+      lruOrder.push_front(key);
+      ins->second.lru = lruOrder.begin();
+      while (algoCache.size() > algoCacheLimit) {
+        algoCache.erase(lruOrder.back());
+        lruOrder.pop_back();
+        ++stats.evictions;
+      }
+    }
+    return &ins->second.h;
   }
 
   void executeMatmul(hipblasOperation_t transA, hipblasOperation_t transB,
@@ -455,8 +535,6 @@ private:
                      const std::pair<std::size_t, std::size_t> &kA,
                      const std::pair<std::size_t, std::size_t> &kB,
                      const std::pair<std::size_t, std::size_t> &kC) {
-    auto &h = getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
-
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     if (bias_ptr) {
       CHECK_HIPBLAS(hipblasLtMatmulDescSetAttribute(
@@ -464,10 +542,25 @@ private:
           sizeof(bias_ptr)));
     }
 
-    CHECK_HIPBLAS(hipblasLtMatmul(ltHandle, desc, &alpha, A, layoutStore.at(kA),
-                                  B, layoutStore.at(kB), &beta, D_in,
-                                  layoutStore.at(kC), C_out, layoutStore.at(kC),
-                                  &h.algo, d_workspace, workspaceSize, stream));
+    const ShapeEnvelope *env = findEnvelope(kA, kB, kC);
+    const std::pair<std::size_t, std::size_t>
+        aA = env ? std::make_pair(env->rowsA, env->colsA) : kA,
+        aB = env ? std::make_pair(env->rowsB, env->colsB) : kB,
+        aC = env ? std::make_pair(env->rowsC, env->colsC) : kC;
+    hipblasLtMatmulHeuristicResult_t h =
+        *getOrComputeAlgo(transA, transB, epilogue, aA, aB, aC);
+
+    if (env && !algoUsable(desc, h.algo, kA, kB, kC)) {
+      ++stats.envelopeRejects;
+      h = *getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
+    }
+
+    auto lA = stampLayout(ROLE_A, kA);
+    auto lB = stampLayout(ROLE_B, kB);
+    auto lC = stampLayout(ROLE_C, kC);
+    CHECK_HIPBLAS(hipblasLtMatmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
+                                  D_in, lC, C_out, lC, &h.algo, d_workspace,
+                                  workspaceSize, stream));
   }
 };
 
