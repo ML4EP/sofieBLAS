@@ -95,6 +95,11 @@ class BlasHip {
   size_t workspaceSize = 1u << 25; // 32 MB
   hipStream_t stream = nullptr;
 
+  // One persistent layout descriptor per GEMM operand: ROLE_A and ROLE_B are
+  // the input matrices of C = alpha * op(A) * op(B) + beta * C, ROLE_C the
+  // output (hipblasLtMatmul takes it twice, as C and D). stampLayout rewrites
+  // each descriptor in place to the shape of the call at hand, which is what
+  // lets one instance serve any runtime size.
   enum LayoutRole { ROLE_A = 0, ROLE_B = 1, ROLE_C = 2 };
   hipblasLtMatrixLayout_t roleLayout[3] = {};
 
@@ -174,10 +179,11 @@ public:
 
   void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t,
                        std::size_t, std::size_t, char transa, char transb) {
-    const auto kA = layoutKeyA(transa, m, k);
-    const auto kB = layoutKeyB(transb, k, n);
-    const std::pair<std::size_t, std::size_t> kC{m, n};
-    envelopes.push_back({kA.first, kA.second, kB.first, kB.second, m, n});
+    const auto shapeA = layoutKeyA(transa, m, k);
+    const auto shapeB = layoutKeyB(transb, k, n);
+    const std::pair<std::size_t, std::size_t> shapeC{m, n};
+    envelopes.push_back(
+        {shapeA.first, shapeA.second, shapeB.first, shapeB.second, m, n});
 
     const hipblasOperation_t tA = charToHipBlasTranspose(transa);
     const hipblasOperation_t tB = charToHipBlasTranspose(transb);
@@ -185,7 +191,7 @@ public:
                                        HIPBLASLT_EPILOGUE_BIAS,
                                        HIPBLASLT_EPILOGUE_RELU_BIAS};
     for (hipblasLtEpilogue_t ep : eps) {
-      getOrComputeAlgo(tA, tB, ep, kA, kB, kC, /*required=*/false);
+      getOrComputeAlgo(tA, tB, ep, shapeA, shapeB, shapeC, /*required=*/false);
     }
   }
 
@@ -410,20 +416,29 @@ private:
     return L;
   }
 
+  // Returns the shape declared through addLayoutConfig that this call belongs
+  // to, or null if none covers it. Shapes are the physical (rows, cols) of
+  // matrices A, B and C, after any transpose is applied (transa='T' makes
+  // shapeA = (k, m)). The contraction dimension (colsA / rowsB) must match
+  // exactly: it comes from the weight tensor and never varies at runtime, so
+  // it identifies the call site and stops one site's declared shape from
+  // serving another's calls. The free dimensions only need covering; among
+  // candidates the least excess wins.
   const ShapeEnvelope *
-  findEnvelope(const std::pair<std::size_t, std::size_t> &kA,
-               const std::pair<std::size_t, std::size_t> &kB,
-               const std::pair<std::size_t, std::size_t> &kC) const {
+  findEnvelope(const std::pair<std::size_t, std::size_t> &shapeA,
+               const std::pair<std::size_t, std::size_t> &shapeB,
+               const std::pair<std::size_t, std::size_t> &shapeC) const {
     const ShapeEnvelope *best = nullptr;
     std::size_t bestExcess = std::numeric_limits<std::size_t>::max();
     for (const auto &e : envelopes) {
-      if (e.colsA != kA.second || e.rowsB != kB.first)
+      if (e.colsA != shapeA.second || e.rowsB != shapeB.first)
         continue;
-      if (e.rowsA < kA.first || e.colsB < kB.second || e.rowsC < kC.first ||
-          e.colsC < kC.second)
+      if (e.rowsA < shapeA.first || e.colsB < shapeB.second ||
+          e.rowsC < shapeC.first || e.colsC < shapeC.second)
         continue;
-      const std::size_t ex = (e.rowsA - kA.first) + (e.colsA - kA.second) +
-                             (e.rowsB - kB.first) + (e.colsB - kB.second);
+      const std::size_t ex =
+          (e.rowsA - shapeA.first) + (e.colsA - shapeA.second) +
+          (e.rowsB - shapeB.first) + (e.colsB - shapeB.second);
       if (ex < bestExcess) {
         bestExcess = ex;
         best = &e;
@@ -433,12 +448,12 @@ private:
   }
 
   bool algoUsable(hipblasLtMatmulDesc_t desc, const hipblasLtMatmulAlgo_t &algo,
-                  const std::pair<std::size_t, std::size_t> &kA,
-                  const std::pair<std::size_t, std::size_t> &kB,
-                  const std::pair<std::size_t, std::size_t> &kC) {
-    auto lA = stampLayout(ROLE_A, kA);
-    auto lB = stampLayout(ROLE_B, kB);
-    auto lC = stampLayout(ROLE_C, kC);
+                  const std::pair<std::size_t, std::size_t> &shapeA,
+                  const std::pair<std::size_t, std::size_t> &shapeB,
+                  const std::pair<std::size_t, std::size_t> &shapeC) {
+    auto lA = stampLayout(ROLE_A, shapeA);
+    auto lB = stampLayout(ROLE_B, shapeB);
+    auto lC = stampLayout(ROLE_C, shapeC);
     // hipBLASLt has no hipblasLtMatmulAlgoCheck; the ext API rewrites the algo
     // it is handed, so probe a copy.
     hipblasLtMatmulAlgo_t probe = algo;
@@ -480,15 +495,15 @@ private:
   hipblasLtMatmulHeuristicResult_t *
   getOrComputeAlgo(hipblasOperation_t transA, hipblasOperation_t transB,
                    hipblasLtEpilogue_t epilogue,
-                   const std::pair<std::size_t, std::size_t> &kA,
-                   const std::pair<std::size_t, std::size_t> &kB,
-                   const std::pair<std::size_t, std::size_t> &kC,
+                   const std::pair<std::size_t, std::size_t> &shapeA,
+                   const std::pair<std::size_t, std::size_t> &shapeB,
+                   const std::pair<std::size_t, std::size_t> &shapeC,
                    bool required = true) {
     AlgoKey key{{(int)transA, (int)transB, (int)epilogue},
-                kA.first,
-                kA.second,
-                kB.first,
-                kB.second};
+                shapeA.first,
+                shapeA.second,
+                shapeB.first,
+                shapeB.second};
     auto it = algoCache.find(key);
     if (it != algoCache.end()) {
       if (algoCacheLimit)
@@ -497,9 +512,9 @@ private:
     }
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
-    auto lA = stampLayout(ROLE_A, kA);
-    auto lB = stampLayout(ROLE_B, kB);
-    auto lC = stampLayout(ROLE_C, kC);
+    auto lA = stampLayout(ROLE_A, shapeA);
+    auto lB = stampLayout(ROLE_B, shapeB);
+    auto lC = stampLayout(ROLE_C, shapeC);
     hipblasLtMatmulHeuristicResult_t h{};
     int returnedResults = 0;
     CHECK_HIPBLAS(hipblasLtMatmulAlgoGetHeuristic(
@@ -510,9 +525,9 @@ private:
         return nullptr;
       std::cerr << "[sofieBLAS] No suitable hipBLASLt algorithm found for "
                 << "transA=" << transA << " transB=" << transB
-                << " epilogue=" << epilogue << " A=[" << kA.first << "x"
-                << kA.second << "]"
-                << " B=[" << kB.first << "x" << kB.second << "]\n";
+                << " epilogue=" << epilogue << " A=[" << shapeA.first << "x"
+                << shapeA.second << "]"
+                << " B=[" << shapeB.first << "x" << shapeB.second << "]\n";
       exit(EXIT_FAILURE);
     }
     auto ins = algoCache.emplace(key, CacheEntry{h, {}}).first;
@@ -532,9 +547,9 @@ private:
                      hipblasLtEpilogue_t epilogue, float alpha, const float *A,
                      const float *B, float beta, const float *D_in,
                      float *C_out, const void *bias_ptr,
-                     const std::pair<std::size_t, std::size_t> &kA,
-                     const std::pair<std::size_t, std::size_t> &kB,
-                     const std::pair<std::size_t, std::size_t> &kC) {
+                     const std::pair<std::size_t, std::size_t> &shapeA,
+                     const std::pair<std::size_t, std::size_t> &shapeB,
+                     const std::pair<std::size_t, std::size_t> &shapeC) {
     auto &desc = getOrCreateDesc(transA, transB, epilogue);
     if (bias_ptr) {
       CHECK_HIPBLAS(hipblasLtMatmulDescSetAttribute(
@@ -542,22 +557,31 @@ private:
           sizeof(bias_ptr)));
     }
 
-    const ShapeEnvelope *env = findEnvelope(kA, kB, kC);
+    // Resolve the algorithm at the call site's declared shape when one covers
+    // this call, so every runtime size the site produces shares one cache
+    // entry; with no covering declaration, resolve at the exact shape.
+    const ShapeEnvelope *env = findEnvelope(shapeA, shapeB, shapeC);
     const std::pair<std::size_t, std::size_t>
-        aA = env ? std::make_pair(env->rowsA, env->colsA) : kA,
-        aB = env ? std::make_pair(env->rowsB, env->colsB) : kB,
-        aC = env ? std::make_pair(env->rowsC, env->colsC) : kC;
-    hipblasLtMatmulHeuristicResult_t h =
-        *getOrComputeAlgo(transA, transB, epilogue, aA, aB, aC);
+        algoShapeA = env ? std::make_pair(env->rowsA, env->colsA) : shapeA,
+        algoShapeB = env ? std::make_pair(env->rowsB, env->colsB) : shapeB,
+        algoShapeC = env ? std::make_pair(env->rowsC, env->colsC) : shapeC;
+    hipblasLtMatmulHeuristicResult_t h = *getOrComputeAlgo(
+        transA, transB, epilogue, algoShapeA, algoShapeB, algoShapeC);
 
-    if (env && !algoUsable(desc, h.algo, kA, kB, kC)) {
+    // Normally the resolution above is the only one. Only when hipBLASLt
+    // rejects the declared shape's algorithm at this call's exact size is the
+    // algorithm resolved a second time, at the exact shape, and that result
+    // is cached as well.
+    if (env && !algoUsable(desc, h.algo, shapeA, shapeB, shapeC)) {
       ++stats.envelopeRejects;
-      h = *getOrComputeAlgo(transA, transB, epilogue, kA, kB, kC);
+      h = *getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC);
     }
 
-    auto lA = stampLayout(ROLE_A, kA);
-    auto lB = stampLayout(ROLE_B, kB);
-    auto lC = stampLayout(ROLE_C, kC);
+    // Stamp the exact call shape last: the algorithm resolution and the
+    // validity check above leave the shared descriptors at other dims.
+    auto lA = stampLayout(ROLE_A, shapeA);
+    auto lB = stampLayout(ROLE_B, shapeB);
+    auto lC = stampLayout(ROLE_C, shapeC);
     CHECK_HIPBLAS(hipblasLtMatmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
                                   D_in, lC, C_out, lC, &h.algo, d_workspace,
                                   workspaceSize, stream));
