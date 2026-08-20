@@ -76,14 +76,15 @@ struct AlgoKeyHash {
   }
 };
 
+// A call site's declared maximum shape, recorded by addLayoutConfig.
 struct ShapeEnvelope {
   std::size_t rowsA, colsA, rowsB, colsB, rowsC, colsC;
 };
 
 struct LayoutStats {
-  std::size_t heuristicQueries = 0;
-  std::size_t envelopeRejects = 0;
-  std::size_t evictions = 0;
+  std::size_t heuristicQueries = 0; // algorithm searches issued
+  std::size_t envelopeRejects = 0;  // declared-shape algo unusable at a call
+  std::size_t evictions = 0;        // entries dropped to stay under the limit
 };
 
 class BlasCuda {
@@ -107,6 +108,7 @@ class BlasCuda {
   // algo cache entry
   struct CacheEntry {
     cublasLtMatmulHeuristicResult_t h{};
+    // position in lruOrder; only valid when a limit is set
     std::list<AlgoKey>::iterator lru{};
   };
   std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
@@ -177,6 +179,12 @@ public:
     }
   }
 
+  // Declares a call site's largest shape (its envelope) and resolves the
+  // algorithm for it up front; the generated Session constructor calls this
+  // once per GEMM call site with its construction-time dimensions. Which
+  // epilogue the site will use is unknown here, so all three used by the
+  // generated code are resolved; unused ones cost one heuristic query each,
+  // off the inference path.
   void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k, std::size_t,
                        std::size_t, std::size_t, char transa, char transb) {
     const auto shapeA = layoutKeyA(transa, m, k);
@@ -399,6 +407,8 @@ private:
                                           : std::make_pair(n, k);
   }
 
+  // Sets a role's layout descriptor to the given physical (rows, cols),
+  // creating it on first use. Matrices are dense column-major, so ld = rows.
   cublasLtMatrixLayout_t
   stampLayout(LayoutRole role, const std::pair<std::size_t, std::size_t> &key) {
     const uint64_t rows = key.first, cols = key.second;
@@ -476,6 +486,9 @@ private:
     return descStore.at(key);
   }
 
+  // Whether the given algorithm can run this exact shape within the
+  // workspace. An algorithm resolved at a declared shape is not guaranteed to
+  // run at every smaller size it covers.
   bool algoUsable(cublasLtMatmulDesc_t desc, const cublasLtMatmulAlgo_t &algo,
                   const std::pair<std::size_t, std::size_t> &shapeA,
                   const std::pair<std::size_t, std::size_t> &shapeB,
@@ -489,6 +502,10 @@ private:
            chk.workspaceSize <= workspaceSize;
   }
 
+  // Looks up, or resolves and caches, the algorithm for the given transpose
+  // settings, epilogue and shapes. required=false is for constructor warmup:
+  // a speculatively resolved epilogue may legitimately have no algorithm, and
+  // returns null instead of aborting.
   cublasLtMatmulHeuristicResult_t *
   getOrComputeAlgo(cublasOperation_t transA, cublasOperation_t transB,
                    cublasLtEpilogue_t epilogue,
