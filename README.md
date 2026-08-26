@@ -96,27 +96,7 @@ sofieBLAS<alpaka::TagGpuHipRt> blas(queue);
 blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
-The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addLayoutConfig` (declares a call site's shape ahead of the first call, which feeds the algorithm cache described below).
-
-## Dynamic GEMM shapes and the algorithm cache
-
-A GEMM call computes `C = alpha * op(A) * op(B) + beta * C`: A and B are the input matrices, C the output, and `op` an optional transpose. The CUDA backend (`BlasCuda`, over cuBLASLt) and the HIP backend (`BlasHip`, over hipBLASLt) implement the following identically. One instance serves GEMM calls at sizes that vary at runtime: for every call, each of the three matrices has its dimensions stamped into a persistent per-matrix layout descriptor right before the multiply, so no layout is ever tied to a fixed shape.
-
-Every matmul also needs an algorithm: the concrete GEMM kernel and its configuration, chosen by querying the library's heuristic (`cublasLtMatmulAlgoGetHeuristic` / `hipblasLtMatmulAlgoGetHeuristic`) for the given transpose settings, epilogue, and matrix dimensions. That query runs on the host and is not free, so its results are cached, keyed by the same parameters. Left at that, a model with runtime-varying sizes would pay one heuristic query per distinct size it meets, and the cache would grow with every new size.
-
-The envelope mechanism removes that cost. An envelope is the largest shape a GEMM call site will ever run, declared through `addLayoutConfig(m, n, k, lda, ldb, ldc, transa, transb)`, which a generated Session constructor calls once per call site with its own construction-time dimensions. `addLayoutConfig` stores the envelope and resolves its algorithm immediately. At matmul time the call is matched to a declared envelope (the contraction dimension must match exactly, which is what ties a call to its own call site), and the algorithm is looked up at the envelope's dimensions rather than the call's, so every runtime size a call site produces shares that one cache entry: no further heuristic queries, no cache growth. A call covered by no envelope is resolved and cached at its exact shape. The library may also reject an envelope's algorithm at a specific smaller size (m=1 was found to do this with cuBLASLt in testing); the backend checks for this and falls back to exact-shape resolution for that call.
-
-The cache is unbounded by default. Pass a limit at construction to cap it with LRU eviction:
-
-```cpp
-sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);       // unbounded cache (default)
-sofieBLAS<alpaka::TagGpuCudaRt> capped(queue, 32); // at most 32 entries, LRU eviction
-sofieBLAS<alpaka::TagGpuHipRt>  hipCapped(queue, 32);
-```
-
-`algoCacheSize()` returns the current entry count and `layoutStats()` returns counters (`heuristicQueries`, `envelopeRejects`, `evictions`) for inspecting cache behaviour.
-
-The exact-shape fallback uses `cublasLtMatmulAlgoCheck` on CUDA. hipBLASLt has no equivalent in its core API, so the HIP backend uses `hipblaslt_ext::matmulIsAlgoSupported` from `hipblaslt-ext.hpp` for the same check.
+The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addLayoutConfig` (used to pre-register cuBLASLt/hipBLASLt matrix layouts for a given shape before the first `matmul`/`gemm` call on that shape).
 
 
 ## Contributing
