@@ -87,8 +87,8 @@ struct CublasLtApi {
   static cudaError_t rtFree(void *ptr) { return cudaFree(ptr); }
 };
 
-#define SOFIEBLAS_CHECK_LT(x) CHECK_CUBLAS(x)
-#define SOFIEBLAS_CHECK_RT(x) CHECK_CUDA(x)
+#define SOFIEBLAS_CHECK_LT(status) CHECK_CUBLAS(status)
+#define SOFIEBLAS_CHECK_RT(err) CHECK_CUDA(err)
 
 #include "../gpu/detail/sofieBLAS_blaslt_common.tpp"
 

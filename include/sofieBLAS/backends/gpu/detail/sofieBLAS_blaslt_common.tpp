@@ -152,46 +152,35 @@ public:
     }
   }
 
-  // An epilogue is the extra step the library fuses into the multiply kernel
-  // after the product: nothing, adding the bias vector, or adding it and
-  // applying the activation. Which one a call site uses is decided by the
-  // function it calls (matmul, gemm, gemmrelu, gemmgelu); addLayoutConfig
-  // receives the same choice as a character so it can resolve the site's
-  // algorithm up front for the right configuration.
-  inline typename Api::Epilogue charToEpilogue(char epilogue) {
-    switch (epilogue) {
-    case 'N':
-    case 'n':
-      return Api::EpilogueDefault;
-    case 'B':
-    case 'b':
-      return Api::EpilogueBias;
-    case 'R':
-    case 'r':
-      return Api::EpilogueReluBias;
-    case 'G':
-    case 'g':
-      return Api::EpilogueGeluBias;
-    default:
-      throw std::invalid_argument(
-          std::string("Invalid epilogue character for ") + Api::name + ".");
-    }
-  }
-
   // Registers a call site's construction-time shape: creates the three matrix
   // layouts and resolves the multiply algorithm for them up front, so the
   // first call at this shape finds everything cached.
-  void addLayoutConfig(std::size_t m, std::size_t n, std::size_t k,
-                       std::size_t lda, std::size_t ldb, std::size_t ldc,
-                       char transa, char transb, char epilogue) {
+  void addOperationConfig(std::size_t m, std::size_t n, std::size_t k,
+                          std::size_t lda, std::size_t ldb, std::size_t ldc,
+                          char transa, char transb, Epilogue epilogue) {
     const auto shapeA = layoutKeyA(transa, m, k);
     const auto shapeB = layoutKeyB(transb, k, n);
     const std::pair<std::size_t, std::size_t> shapeC{m, n};
     getOrCreateLayout(shapeA, lda);
     getOrCreateLayout(shapeB, ldb);
     getOrCreateLayout(shapeC, ldc);
+
+    typename Api::Epilogue apiEpilogue = Api::EpilogueDefault;
+    switch (epilogue) {
+    case Epilogue::Bias:
+      apiEpilogue = Api::EpilogueBias;
+      break;
+    case Epilogue::ReluBias:
+      apiEpilogue = Api::EpilogueReluBias;
+      break;
+    case Epilogue::GeluBias:
+      apiEpilogue = Api::EpilogueGeluBias;
+      break;
+    case Epilogue::Default:
+      break;
+    }
     getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                     charToEpilogue(epilogue), shapeA, shapeB, shapeC);
+                     apiEpilogue, shapeA, shapeB, shapeC);
   }
 
   // Each multiply variant comes as one generic overload, where A, B, bias and

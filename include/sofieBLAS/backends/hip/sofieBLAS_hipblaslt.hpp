@@ -88,8 +88,8 @@ struct HipblasLtApi {
   static hipError_t rtFree(void *ptr) { return hipFree(ptr); }
 };
 
-#define SOFIEBLAS_CHECK_LT(x) CHECK_HIPBLAS(x)
-#define SOFIEBLAS_CHECK_RT(x) CHECK_HIP(x)
+#define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
+#define SOFIEBLAS_CHECK_RT(err) CHECK_HIP(err)
 
 #include "../gpu/detail/sofieBLAS_blaslt_common.tpp"
 
