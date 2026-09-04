@@ -96,7 +96,47 @@ sofieBLAS<alpaka::TagGpuHipRt> blas(queue);
 blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
-The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addLayoutConfig` (used to pre-register cuBLASLt/hipBLASLt matrix layouts for a given shape before the first `matmul`/`gemm` call on that shape).
+The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addOperationConfig` (creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call, see below).
+
+## Dynamic GEMM shapes and the algorithm cache
+
+A GEMM call computes `C = alpha * op(A) * op(B) + beta * C`, where A and B are the input matrices, C the output, and `op` an optional transpose. To run one, cuBLASLt and hipBLASLt need three kinds of objects besides the data:
+
+- a **matrix layout** per matrix: a descriptor holding its rows, columns and leading dimension;
+- a **matmul descriptor**: the operation settings (the transposes and the epilogue);
+- an **algorithm**: the concrete GEMM kernel the library selects for the given settings and dimensions, obtained by querying its heuristic (`cublasLtMatmulAlgoGetHeuristic` / `hipblasLtMatmulAlgoGetHeuristic`). The query runs on the host and is not free.
+
+The CUDA backend (`BlasCuda`, over cuBLASLt) and the HIP backend (`BlasHip`, over hipBLASLt) behave identically: all three objects are created the first time a combination appears and cached, keyed by the exact dimensions plus, for descriptors and algorithms, the transposes and the epilogue. One instance therefore serves GEMM calls at sizes that vary at runtime: a size seen for the first time creates and caches its objects, and a repeated size reuses them without another heuristic query.
+
+### Warming the cache with addOperationConfig
+
+`addOperationConfig(m, n, k, lda, ldb, ldc, transa, transb, epilogue)` fills the cache for one call site ahead of its first call: it creates the three layouts and resolves the algorithm for the given dimensions. The `epilogue` argument is the `Epilogue` enum from `sofieBLAS/core.hpp` and names which call the site will make, because the fused epilogue is part of the selected kernel:
+
+| `Epilogue` value | call it configures |
+| --- | --- |
+| `Epilogue::Default` | `matmul` (no bias) |
+| `Epilogue::Bias` | `gemm` (adds the bias vector) |
+| `Epilogue::ReluBias` | `gemmrelu` (bias, then ReLU) |
+| `Epilogue::GeluBias` | `gemmgelu` (bias, then GELU) |
+
+A generated Session constructor calls it once per GEMM call site with the construction-time dimensions, so the first inference pays no heuristic queries at those sizes.
+
+### Initializing the cache limit
+
+The algorithm cache is unbounded by default. Passing a limit as the second constructor argument caps the number of cached algorithms; when an insertion would exceed the limit, the least recently used entries are evicted. Choose a limit at least as large as the number of distinct shapes the workload uses regularly, or leave it unbounded. `algoCacheSize()` returns the current number of entries.
+
+```cpp
+sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);       // unbounded algorithm cache (default)
+sofieBLAS<alpaka::TagGpuCudaRt> capped(queue, 32); // at most 32 entries, LRU eviction
+
+blas.addOperationConfig(64, 3, 5, 64, 5, 64, 'N', 'N', Epilogue::Default);
+blas.matmul('N', 'N', 64, 3, 5, 1.0f, dA, dB, 0.0f, dC); // warmed: cache hit
+blas.matmul('N', 'N', 37, 3, 5, 1.0f, dA, dB, 0.0f, dC); // new size: created on first use
+```
+
+### One implementation for both GPU backends
+
+The CUDA and HIP backends share one implementation: `include/sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp` contains the class template `BlasLt`, and each backend header defines a table with its library's types, constants and functions (`CublasLtApi` in `sofieBLAS_cublas.hpp`, `HipblasLtApi` in `sofieBLAS_hipblaslt.hpp`) and instantiates the template with it. This is the same arrangement the CPU backends use with `backends/cpu/detail/sofieBLAS_cblas_common.hpp`.
 
 
 ## Contributing
