@@ -32,8 +32,8 @@
     }                                                                          \
   } while (0)
 
-// The hipBLASLt spellings of everything the shared BlasLt implementation in
-// backends/gpu/detail uses: types, enum values and functions.
+// The hipBLASLt forwarding of the shared BlasLt implementation in
+// backends/gpu/detail
 struct HipblasLtApi {
   using Queue = alpaka::QueueHipRtNonBlocking;
   using Handle = hipblasLtHandle_t;

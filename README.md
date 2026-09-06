@@ -96,7 +96,10 @@ sofieBLAS<alpaka::TagGpuHipRt> blas(queue);
 blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
-The GPU backends (`BlasCuda`, `BlasHip`) additionally expose `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues), `gemmStridedBatched`, and `addOperationConfig` (creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call, see below).
+The GPU backends (`BlasCuda`, `BlasHip`) additionally expose 
+- `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues)
+- `gemmStridedBatched` for batched gemm operations through strides
+- `addOperationConfig` that creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call (see below).
 
 ## Dynamic GEMM shapes and the algorithm cache
 
@@ -108,9 +111,9 @@ A GEMM call computes `C = alpha * op(A) * op(B) + beta * C`, where A and B are t
 
 The CUDA backend (`BlasCuda`, over cuBLASLt) and the HIP backend (`BlasHip`, over hipBLASLt) behave identically: all three objects are created the first time a combination appears and cached, keyed by the exact dimensions plus, for descriptors and algorithms, the transposes and the epilogue. One instance therefore serves GEMM calls at sizes that vary at runtime: a size seen for the first time creates and caches its objects, and a repeated size reuses them without another heuristic query.
 
-### Warming the cache with addOperationConfig
+### addOperationConfig
 
-`addOperationConfig(m, n, k, lda, ldb, ldc, transa, transb, epilogue)` fills the cache for one call site ahead of its first call: it creates the three layouts and resolves the algorithm for the given dimensions. The `epilogue` argument is the `Epilogue` enum from `sofieBLAS/core.hpp` and names which call the site will make, because the fused epilogue is part of the selected kernel:
+`addOperationConfig(m, n, k, lda, ldb, ldc, transa, transb, epilogue)` creates all three objects for one operation (the matrix layouts, the matmul descriptor and the algorithm) for the given dimensions, transposes and epilogue, before the corresponding call is made. It is optional: a combination that was never configured is created and cached on its first call. The `epilogue` argument is the `Epilogue` enum from `sofieBLAS/core.hpp` and names which call the site will make, because the fused epilogue is part of the selected kernel:
 
 | `Epilogue` value | call it configures |
 | --- | --- |
@@ -118,8 +121,6 @@ The CUDA backend (`BlasCuda`, over cuBLASLt) and the HIP backend (`BlasHip`, ove
 | `Epilogue::Bias` | `gemm` (adds the bias vector) |
 | `Epilogue::ReluBias` | `gemmrelu` (bias, then ReLU) |
 | `Epilogue::GeluBias` | `gemmgelu` (bias, then GELU) |
-
-A generated Session constructor calls it once per GEMM call site with the construction-time dimensions, so the first inference pays no heuristic queries at those sizes.
 
 ### Initializing the cache limit
 
@@ -130,13 +131,9 @@ sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);       // unbounded algorithm cache 
 sofieBLAS<alpaka::TagGpuCudaRt> capped(queue, 32); // at most 32 entries, LRU eviction
 
 blas.addOperationConfig(64, 3, 5, 64, 5, 64, 'N', 'N', Epilogue::Default);
-blas.matmul('N', 'N', 64, 3, 5, 1.0f, dA, dB, 0.0f, dC); // warmed: cache hit
+blas.matmul('N', 'N', 64, 3, 5, 1.0f, dA, dB, 0.0f, dC); // created by addOperationConfig: cache hit
 blas.matmul('N', 'N', 37, 3, 5, 1.0f, dA, dB, 0.0f, dC); // new size: created on first use
 ```
-
-### One implementation for both GPU backends
-
-The CUDA and HIP backends share one implementation: `include/sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp` contains the class template `BlasLt`, and each backend header defines a table with its library's types, constants and functions (`CublasLtApi` in `sofieBLAS_cublas.hpp`, `HipblasLtApi` in `sofieBLAS_hipblaslt.hpp`) and instantiates the template with it. This is the same arrangement the CPU backends use with `backends/cpu/detail/sofieBLAS_cblas_common.hpp`.
 
 
 ## Contributing

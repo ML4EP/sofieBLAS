@@ -32,8 +32,8 @@
     }                                                                          \
   } while (0)
 
-// The cuBLASLt spellings of everything the shared BlasLt implementation in
-// backends/gpu/detail uses: types, enum values and functions.
+// The cuBLASLt forwarding of the shared BlasLt implementation in
+// backends/gpu/detail
 struct CublasLtApi {
   using Queue = alpaka::QueueCudaRtNonBlocking;
   using Handle = cublasLtHandle_t;
