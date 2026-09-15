@@ -19,7 +19,11 @@ env:
 
 jobs:
   cpu-tests:
-    name: CPU Unit Tests
+    name: CPU Unit Tests (${{ matrix.blas }})
+    strategy:
+      fail-fast: false
+      matrix:
+        blas: [OpenBLAS, MKL]
     if: |
       github.event_name != 'issue_comment' ||
       (
@@ -28,7 +32,7 @@ jobs:
         !startsWith(github.event.comment.body, '/runbenchmark')
       )
     concurrency:
-      group: cpu-tests-${{ github.event.issue.number || github.ref }}
+      group: cpu-tests-${{ matrix.blas }}-${{ github.event.issue.number || github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -38,10 +42,19 @@ jobs:
         with:
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/merge', github.event.issue.number) || github.ref }}
 
-      - name: Install OpenBLAS
+      - name: Install ${{ matrix.blas }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libopenblas-dev
+          if [ "${{ matrix.blas }}" = MKL ]; then
+            wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+              | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+            echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
+              | sudo tee /etc/apt/sources.list.d/oneAPI.list
+            sudo apt-get update
+            sudo apt-get install -y intel-oneapi-mkl-devel
+          else
+            sudo apt-get update
+            sudo apt-get install -y libopenblas-dev
+          fi
 
       - name: Cache FetchContent dependencies
         uses: actions/cache@v4
@@ -51,6 +64,7 @@ jobs:
           restore-keys: cmake-deps-cpu-
 
       - name: Configure
+        shell: bash
         run: |
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
@@ -58,20 +72,24 @@ jobs:
             -DSOFIEBLAS_BUILD_BENCHMARKS=ON \
             -DSOFIEBLAS_ENABLE_CUDA=OFF \
             -DSOFIEBLAS_ENABLE_HIP=OFF \
-            "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}"
+            -DCPU_BLAS_LIB=${{ matrix.blas }} \
+            "-DFETCHCONTENT_BASE_DIR=${{ env.DEPS_CACHE }}" | tee configure.log
+          grep -q "using CPU BLAS library ${{ matrix.blas }}" configure.log
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
       - name: Run tests
         working-directory: build
+        env:
+          LD_LIBRARY_PATH: /opt/intel/oneapi/mkl/latest/lib/intel64:/opt/intel/oneapi/mkl/latest/lib
         run: ctest --output-on-failure -j"$(nproc)" -R '\.cpu(\.|$)'
 
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpu-test-log-${{ github.run_id }}
+          name: cpu-test-log-${{ matrix.blas }}-${{ github.run_id }}
           path: build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
