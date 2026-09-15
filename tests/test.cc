@@ -133,12 +133,12 @@ int main() {
   runCpuTests();
 #endif
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
-  runGpuTests<alpaka::TagGpuCudaRt>("CUDA");
-  runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>("CUDA");
+  runGpuTests<alpaka::TagGpuCudaRt>();
+  runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>();
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
-  runGpuTests<alpaka::TagGpuHipRt>("HIP");
-  runGpuDynamicShapeTests<alpaka::TagGpuHipRt>("HIP");
+  runGpuTests<alpaka::TagGpuHipRt>();
+  runGpuDynamicShapeTests<alpaka::TagGpuHipRt>();
 #endif
 
   std::cout << "\n";

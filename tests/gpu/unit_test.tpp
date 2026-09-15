@@ -1,10 +1,8 @@
 
 // shared test for CUDA/HIP
 
-template <typename TTag>
-
-static void runGpuTests(const std::string &backend) {
-  std::cout << "\n=== " << backend << " Tests ===\n";
+template <typename TTag> static void runGpuTests() {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
 
   using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
   using DevAcc = alpaka::Dev<Acc>;
@@ -59,7 +57,7 @@ static void runGpuTests(const std::string &backend) {
   std::fill(ref.begin(), ref.end(), 0.f);
   refMatmul(ref.data(), A, B, M, N, K, 1.f, 0.f, false, false);
   blas.matmul('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dC);
-  verify(backend + "::matmul NN");
+  verify("matmul NN");
 
   // ---- matmul TN ----
   {
@@ -75,7 +73,7 @@ static void runGpuTests(const std::string &backend) {
     std::fill(ref.begin(), ref.end(), 0.f);
     refMatmul(ref.data(), At, B, M, N, K, 1.f, 0.f, true, false);
     blas.matmul('T', 'N', M, N, K, 1.f, dAt, dB, 0.f, dC);
-    verify(backend + "::matmul TN");
+    verify("matmul TN");
   }
 
   // ---- matmul NT ----
@@ -92,14 +90,14 @@ static void runGpuTests(const std::string &backend) {
     std::fill(ref.begin(), ref.end(), 0.f);
     refMatmul(ref.data(), A, Bt, M, N, K, 1.f, 0.f, false, true);
     blas.matmul('N', 'T', M, N, K, 1.f, dA, dBt, 0.f, dC);
-    verify(backend + "::matmul NT");
+    verify("matmul NT");
   }
 
   // ---- matmul alpha=2.5 ----
   std::fill(ref.begin(), ref.end(), 0.f);
   refMatmul(ref.data(), A, B, M, N, K, 2.5f, 0.f, false, false);
   blas.matmul('N', 'N', M, N, K, 2.5f, dA, dB, 0.f, dC);
-  verify(backend + "::matmul alpha=2.5");
+  verify("matmul alpha=2.5");
 
   // ---- gemm NN beta=0 ----
   fillSeq(bias, M * N, 0.1f, 0.1f);
@@ -108,14 +106,14 @@ static void runGpuTests(const std::string &backend) {
   std::fill(ref.begin(), ref.end(), 0.f);
   refGemm(ref.data(), A, B, bias, M, N, K, 1.f, 0.f, false, false);
   blas.gemm('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBias, dC);
-  verify(backend + "::gemm NN beta=0");
+  verify("gemm NN beta=0");
 
   // ---- gemm NN beta=1 ----
   // D_in = bias, so result = A*B + 1*bias_matrix + bias_vec
   std::fill(ref.begin(), ref.end(), 0.f);
   refGemm(ref.data(), A, B, bias, M, N, K, 1.f, 1.f, false, false);
   blas.gemm('N', 'N', M, N, K, 1.f, dA, dB, 1.f, dBias, dC);
-  verify(backend + "::gemm NN beta=1");
+  verify("gemm NN beta=1");
 
   // ---- gemm TN ----
   {
@@ -131,7 +129,7 @@ static void runGpuTests(const std::string &backend) {
     std::fill(ref.begin(), ref.end(), 0.f);
     refGemm(ref.data(), At, B, bias, M, N, K, 1.f, 0.f, true, false);
     blas.gemm('T', 'N', M, N, K, 1.f, dAt, dB, 0.f, dBias, dC);
-    verify(backend + "::gemm TN");
+    verify("gemm TN");
   }
 
   // ---- gemmrelu: all-positive (relu is identity) ----
@@ -160,7 +158,7 @@ static void runGpuTests(const std::string &backend) {
     refGemmRelu(ref.data(), Ap, Bp, alpaka::getPtrNative(hBiasz), M, N, K, 1.f,
                 0.f, false, false);
     blas.gemmrelu('N', 'N', M, N, K, 1.f, dAp, dBp, 0.f, dBiasz, dC);
-    verify(backend + "::gemmrelu all-positive");
+    verify("gemmrelu all-positive");
   }
 
   // ---- gemmrelu: alpha=-1 forces negatives -> clamped to zero ----
@@ -176,7 +174,7 @@ static void runGpuTests(const std::string &backend) {
     refGemmRelu(ref.data(), A, B, alpaka::getPtrNative(hBiasz), M, N, K, -1.f,
                 0.f, false, false);
     blas.gemmrelu('N', 'N', M, N, K, -1.f, dA, dB, 0.f, dBiasz, dC);
-    verify(backend + "::gemmrelu alpha=-1 (clamped)");
+    verify("gemmrelu alpha=-1 (clamped)");
   }
 
   // ---- gemmrelu with mixed bias ----
@@ -186,7 +184,7 @@ static void runGpuTests(const std::string &backend) {
   std::fill(ref.begin(), ref.end(), 0.f);
   refGemmRelu(ref.data(), A, B, bias, M, N, K, 1.f, 0.f, false, false);
   blas.gemmrelu('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBias, dC);
-  verify(backend + "::gemmrelu with mixed bias");
+  verify("gemmrelu with mixed bias");
 
   // ---- gemmgelu NN ----
   fillVal(bias, M * N, 0.f);
@@ -195,7 +193,7 @@ static void runGpuTests(const std::string &backend) {
   std::fill(ref.begin(), ref.end(), 0.f);
   refGemmGelu(ref.data(), A, B, bias, M, N, K, 1.f, 0.f, false, false);
   blas.gemmgelu('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBias, dC);
-  verify(backend + "::gemmgelu NN");
+  verify("gemmgelu NN");
 
   // ---- gemmgelu with bias ----
   fillSeq(bias, M * N, -2.f, 0.5f);
@@ -204,7 +202,7 @@ static void runGpuTests(const std::string &backend) {
   std::fill(ref.begin(), ref.end(), 0.f);
   refGemmGelu(ref.data(), A, B, bias, M, N, K, 1.f, 0.f, false, false);
   blas.gemmgelu('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBias, dC);
-  verify(backend + "::gemmgelu with bias");
+  verify("gemmgelu with bias");
 
   // ---- edge: zero A ----
   {
@@ -216,13 +214,13 @@ static void runGpuTests(const std::string &backend) {
     alpaka::wait(queue);
     std::fill(ref.begin(), ref.end(), 0.f);
     blas.matmul('N', 'N', M, N, K, 1.f, dZero, dB, 0.f, dC);
-    verify(backend + "::matmul zero-A");
+    verify("matmul zero-A");
   }
 }
 
 template <typename TTag>
-static void runGpuDynamicShapeTests(const std::string &backend) {
-  std::cout << "\n=== " << backend << " Dynamic-Shape Tests ===\n";
+static void runGpuDynamicShapeTests() {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
 
   using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
   using DevAcc = alpaka::Dev<Acc>;
@@ -275,7 +273,7 @@ static void runGpuDynamicShapeTests(const std::string &backend) {
   };
 
   for (int m : {M0, 37, 8, 51, 1, M0, MCAP})
-    runAt(m, backend + "::dynamic m=" + std::to_string(m));
+    runAt(m, "dynamic m=" + std::to_string(m));
 
   // Generated code calls the raw-pointer overloads; one call keeps them
   // compiled and resolving to the right overload.
@@ -286,7 +284,7 @@ static void runGpuDynamicShapeTests(const std::string &backend) {
               alpaka::getPtrNative(dC));
   alpaka::memcpy(queue, hC, dC);
   alpaka::wait(queue);
-  checkClose(C, ref.data(), 45 * N, backend + "::dynamic raw pointers m=45");
+  checkClose(C, ref.data(), 45 * N, "dynamic raw pointers m=45");
 
   // 32 distinct sizes through a cache limited to 8 entries.
   {
@@ -306,9 +304,9 @@ static void runGpuDynamicShapeTests(const std::string &backend) {
         worst = std::max(worst, std::abs(C[i] - ref[i]));
     }
     if (capped.algoCacheSize() <= 8 && worst < 1e-3f) {
-      std::cout << "  PASS  " << backend << "::cache limit honoured\n";
+      std::cout << "  PASS  cache limit honoured\n";
     } else {
-      std::cerr << "  FAIL [" << backend << "::cache limit honoured] "
+      std::cerr << "  FAIL [cache limit honoured] "
                 << capped.algoCacheSize() << " entries, worst err " << worst
                 << "\n";
       ++gFailures;
