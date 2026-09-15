@@ -83,6 +83,7 @@ jobs:
         working-directory: build
         env:
           LD_LIBRARY_PATH: /opt/intel/oneapi/mkl/latest/lib/intel64:/opt/intel/oneapi/mkl/latest/lib
+          MKL_THREADING_LAYER: SEQUENTIAL
         run: ctest --output-on-failure -j"$(nproc)" -R '\.cpu(\.|$)'
 
       - name: Upload test log
