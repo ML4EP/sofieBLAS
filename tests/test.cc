@@ -2,6 +2,7 @@
 #include <alpaka/alpaka.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -73,7 +74,41 @@ static void refGemmGelu(float *C, const float *A, const float *B,
     C[i] *= 0.5f * (1.f + std::erff(C[i] * kInvSqrt2));
 }
 
+static void refMatmulInt8(std::int32_t *C, const std::int8_t *A,
+                          const std::int8_t *B, int m, int n, int k, bool transA,
+                          bool transB) {
+  int lda = transA ? k : m;
+  int ldb = transB ? n : k;
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < m; ++i) {
+      std::int32_t sum = 0;
+      for (int p = 0; p < k; ++p) {
+        std::int32_t a = transA ? A[i * lda + p] : A[p * lda + i];
+        std::int32_t b = transB ? B[p * ldb + j] : B[j * ldb + p];
+        sum += a * b;
+      }
+      C[j * m + i] = sum;
+    }
+  }
+}
+
 static int gFailures = 0;
+
+static void checkEqual(const std::int32_t *got, const std::int32_t *expected,
+                       int n, const std::string &name) {
+  bool pass = true;
+  for (int i = 0; i < n; ++i) {
+    if (got[i] != expected[i]) {
+      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
+                << " expected=" << expected[i] << "\n";
+      pass = false;
+    }
+  }
+  if (pass)
+    std::cout << "  PASS  " << name << "\n";
+  else
+    ++gFailures;
+}
 
 static void checkClose(const float *got, const float *expected, int n,
                        const std::string &name, float rtol = 1e-4f,
@@ -135,10 +170,12 @@ int main() {
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
   runGpuTests<alpaka::TagGpuCudaRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>();
+  runGpuInt8Tests<alpaka::TagGpuCudaRt>();
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
   runGpuTests<alpaka::TagGpuHipRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuHipRt>();
+  runGpuInt8Tests<alpaka::TagGpuHipRt>();
 #endif
 
   std::cout << "\n";
