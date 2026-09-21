@@ -2,13 +2,11 @@
 
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
 
-#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <list>
-#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -60,21 +58,24 @@ struct HipblasLtApi {
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
-  static constexpr auto RealI8  = HIP_R_8I;
+  static constexpr auto RealI8 = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
-  static constexpr bool SupportsBiasBatchStride = false;
-  static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
-  static constexpr auto LayoutStridedBatchOffset =
-      HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto DescBiasDataType =
       HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutBatchStride =
+      HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = HIPBLAS_STATUS_SUCCESS;
   static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
+  // hipBLASLt reads alpha and beta in the compute type, so a descriptor whose
+  // scale type differs from its compute type cannot be given a matching alpha.
+  static constexpr bool alphaHasScaleType = false;
   static constexpr const char *name = "hipBLASLt";
 
   static constexpr auto ltCreate = hipblasLtCreate;

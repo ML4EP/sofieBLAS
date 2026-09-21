@@ -2,13 +2,11 @@
 
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
 
-#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <list>
-#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -60,22 +58,24 @@ struct CublasLtApi {
   static constexpr auto ComputeF32 = CUBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = CUBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = CUDA_R_32F;
-  static constexpr auto RealI8  = CUDA_R_8I;
+  static constexpr auto RealI8 = CUDA_R_8I;
   static constexpr auto RealI32 = CUDA_R_32I;
   static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
-  static constexpr bool SupportsBiasBatchStride = true;
-  static constexpr auto DescBiasBatchStride =
-      CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
-  static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
-  static constexpr auto LayoutStridedBatchOffset =
-      CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto DescBiasDataType = CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutBatchStride =
+      CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = CUBLAS_STATUS_SUCCESS;
   static constexpr auto StatusNotSupported = CUBLAS_STATUS_NOT_SUPPORTED;
+  // cuBLASLt reads alpha and beta in the descriptor's scale type; hipBLASLt
+  // reads them in the compute type. An integer GEMM with a float alpha is
+  // therefore only expressible here.
+  static constexpr bool alphaHasScaleType = true;
   static constexpr const char *name = "cuBLASLt";
 
   static constexpr auto ltCreate = cublasLtCreate;
