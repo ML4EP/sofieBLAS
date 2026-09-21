@@ -314,3 +314,90 @@ static void runGpuDynamicShapeTests() {
   }
 }
 
+template <typename TTag> static void runGpuInt8Tests() {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+
+  using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
+  using DevAcc = alpaka::Dev<Acc>;
+  using PlatformAcc = alpaka::Platform<Acc>;
+
+  PlatformAcc platform{};
+  auto dev = alpaka::getDevByIdx(platform, 0u);
+  alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
+  sofieBLAS<TTag> blas(queue);
+
+  alpaka::PlatformCpu hostPlatform{};
+  auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
+
+  constexpr int M = 16, N = 32, K = 32, BATCH = 2;
+
+  auto hA = alpaka::allocBuf<std::int8_t, Idx>(hostDev,
+                                              static_cast<Idx>(BATCH * M * K));
+  auto hB = alpaka::allocBuf<std::int8_t, Idx>(hostDev,
+                                              static_cast<Idx>(BATCH * K * N));
+  auto hC = alpaka::allocBuf<std::int32_t, Idx>(hostDev,
+                                               static_cast<Idx>(BATCH * M * N));
+  std::int8_t *A = alpaka::getPtrNative(hA);
+  std::int8_t *B = alpaka::getPtrNative(hB);
+  std::int32_t *C = alpaka::getPtrNative(hC);
+  for (int i = 0; i < BATCH * M * K; ++i)
+    A[i] = static_cast<std::int8_t>(i % 23 - 11);
+  for (int i = 0; i < BATCH * K * N; ++i)
+    B[i] = static_cast<std::int8_t>(i % 19 - 9);
+
+  auto dA = alpaka::allocAsyncBuf<std::int8_t, Idx>(
+      queue, static_cast<Idx>(BATCH * M * K));
+  auto dB = alpaka::allocAsyncBuf<std::int8_t, Idx>(
+      queue, static_cast<Idx>(BATCH * K * N));
+  auto dC = alpaka::allocAsyncBuf<std::int32_t, Idx>(
+      queue, static_cast<Idx>(BATCH * M * N));
+  alpaka::memcpy(queue, dA, hA);
+  alpaka::memcpy(queue, dB, hB);
+  alpaka::wait(queue);
+
+  std::vector<std::int32_t> ref(BATCH * M * N);
+  auto verify = [&](int count, const std::string &name) {
+    alpaka::memcpy(queue, hC, dC);
+    alpaka::wait(queue);
+    checkEqual(C, ref.data(), count, name);
+  };
+  auto probe = [&](bool got, const std::string &name) {
+    if (got)
+      std::cout << "  PASS  " << name << "\n";
+    else {
+      std::cerr << "  FAIL [" << name << "] no int8 kernel reported\n";
+      ++gFailures;
+    }
+  };
+
+  // ---- int8 matmul NN ----
+  probe(blas.addOperationConfig('N', 'N', M, N, K, DataType::I8, DataType::I32),
+        "int8 probe NN");
+  refMatmulInt8(ref.data(), A, B, M, N, K, false, false);
+  blas.matmul('N', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
+              alpaka::getPtrNative(dB), std::int32_t{0},
+              alpaka::getPtrNative(dC));
+  verify(M * N, "int8 matmul NN");
+
+  // ---- int8 matmul TN (A stored k x m) ----
+  probe(blas.addOperationConfig('T', 'N', M, N, K, DataType::I8, DataType::I32),
+        "int8 probe TN");
+  refMatmulInt8(ref.data(), A, B, M, N, K, true, false);
+  blas.matmul('T', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
+              alpaka::getPtrNative(dB), std::int32_t{0},
+              alpaka::getPtrNative(dC));
+  verify(M * N, "int8 matmul TN");
+
+  // ---- int8 matmul NN, strided batch of 2 ----
+  probe(blas.addOperationConfig('N', 'N', M, N, K, DataType::I8, DataType::I32,
+                                BATCH, M * K, K * N, M * N),
+        "int8 probe batched");
+  for (int b = 0; b < BATCH; ++b)
+    refMatmulInt8(ref.data() + b * M * N, A + b * M * K, B + b * K * N, M, N,
+                  K, false, false);
+  blas.matmul('N', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
+              alpaka::getPtrNative(dB), std::int32_t{0},
+              alpaka::getPtrNative(dC), BATCH, M * K, K * N, M * N);
+  verify(BATCH * M * N, "int8 matmul batched");
+}
+

@@ -2,6 +2,7 @@
 
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
 
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -53,14 +54,28 @@ struct HipblasLtApi {
   static constexpr auto EpilogueBias = HIPBLASLT_EPILOGUE_BIAS;
   static constexpr auto EpilogueReluBias = HIPBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = HIPBLASLT_EPILOGUE_GELU_BIAS;
+  static constexpr auto EpilogueRelu = HIPBLASLT_EPILOGUE_RELU;
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
+  static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
+  static constexpr auto RealI8 = HIP_R_8I;
+  static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr auto DescBiasDataType =
+      HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutBatchStride =
+      HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = HIPBLAS_STATUS_SUCCESS;
+  static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
+  // hipBLASLt reads alpha and beta in the compute type, so a descriptor whose
+  // scale type differs from its compute type cannot be given a matching alpha.
+  static constexpr bool alphaHasScaleType = false;
   static constexpr const char *name = "hipBLASLt";
 
   static constexpr auto ltCreate = hipblasLtCreate;
@@ -74,6 +89,7 @@ struct HipblasLtApi {
       hipblasLtMatmulPreferenceSetAttribute;
   static constexpr auto layoutCreate = hipblasLtMatrixLayoutCreate;
   static constexpr auto layoutDestroy = hipblasLtMatrixLayoutDestroy;
+  static constexpr auto layoutSetAttribute = hipblasLtMatrixLayoutSetAttribute;
   static constexpr auto descCreate = hipblasLtMatmulDescCreate;
   static constexpr auto descDestroy = hipblasLtMatmulDescDestroy;
   static constexpr auto descSetAttribute = hipblasLtMatmulDescSetAttribute;
