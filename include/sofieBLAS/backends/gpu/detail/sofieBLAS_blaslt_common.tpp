@@ -3,46 +3,33 @@
 // written once against an Api table. A vendor header defines that table
 // (the types, constants and functions of its library), defines the check
 // macros SOFIEBLAS_CHECK_LT and SOFIEBLAS_CHECK_RT, includes the vendor and
-// standard headers and then includes this file.
-
-struct PairHash {
-  std::size_t
-  operator()(const std::pair<std::size_t, std::size_t> &p) const noexcept {
-    std::size_t h1 = std::hash<std::size_t>{}(p.first);
-    std::size_t h2 = std::hash<std::size_t>{}(p.second);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
-  }
-};
+// standard headers (<cstdint>, <cstdlib>, <functional>, <iostream>, <list>,
+// <stdexcept>, <string>, <unordered_map>, <utility>, alpaka), and then
+// includes this file.
 
 struct LayoutKey {
   int type;
   std::size_t rows, cols;
+  int batchCount;
+  std::int64_t batchStride;
   bool operator==(const LayoutKey &o) const noexcept {
-    return type == o.type && rows == o.rows && cols == o.cols;
+    return type == o.type && rows == o.rows && cols == o.cols &&
+           batchCount == o.batchCount && batchStride == o.batchStride;
   }
 };
 
 struct LayoutKeyHash {
   std::size_t operator()(const LayoutKey &k) const noexcept {
-    std::size_t h = PairHash{}({k.rows, k.cols});
-    return h ^ (std::hash<int>{}(k.type) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-                (h >> 2));
-  }
-};
-
-struct LdKey {
-  int type;
-  std::size_t rows, cols, ld;
-  bool operator==(const LdKey &o) const noexcept {
-    return type == o.type && rows == o.rows && cols == o.cols && ld == o.ld;
-  }
-};
-
-struct LdKeyHash {
-  std::size_t operator()(const LdKey &k) const noexcept {
-    return PairHash{}({k.rows, k.cols}) ^
-           (std::hash<std::size_t>{}(k.ld) * 31u) ^
-           (std::hash<int>{}(k.type) * 17u);
+    std::size_t h = static_cast<std::size_t>(k.type);
+    auto mix = [&](std::size_t v) {
+      h ^= std::hash<std::size_t>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+           (h >> 2);
+    };
+    mix(k.rows);
+    mix(k.cols);
+    mix(static_cast<std::size_t>(k.batchCount));
+    mix(static_cast<std::size_t>(k.batchStride));
+    return h;
   }
 };
 
@@ -50,11 +37,13 @@ struct DescKey {
   int transA; // backend transpose enum encoded as int
   int transB;
   int epilogue; // backend epilogue enum encoded as int
-  int computeType;
-  int scaleType;
+  int compute;  // backend compute-type enum encoded as int
+  int scaleType; // backend data-type enum of alpha and beta
+  int biasType;  // backend data-type enum of the bias, -1 = library default
   bool operator==(const DescKey &o) const noexcept {
-    return transA == o.transA && transB == o.transB && epilogue == o.epilogue &&
-           computeType == o.computeType && scaleType == o.scaleType;
+    return transA == o.transA && transB == o.transB &&
+           epilogue == o.epilogue && compute == o.compute &&
+           scaleType == o.scaleType && biasType == o.biasType;
   }
 };
 
@@ -63,21 +52,18 @@ struct DescKeyHash {
     std::size_t h = static_cast<std::size_t>(k.transA) * 97u +
                     static_cast<std::size_t>(k.transB) * 31u +
                     static_cast<std::size_t>(k.epilogue);
-    h = h * 31u + static_cast<std::size_t>(k.computeType);
-    h = h * 31u + static_cast<std::size_t>(k.scaleType);
+    h = h * 131u + static_cast<std::size_t>(k.compute);
+    h = h * 131u + static_cast<std::size_t>(k.scaleType);
+    h = h * 131u + static_cast<std::size_t>(k.biasType + 1);
     return h ^ (h >> 16);
   }
 };
 
 struct AlgoKey {
   DescKey dk;
-  std::size_t rowsA, colsA; // physical dimensions of A in layoutStore
-  std::size_t rowsB, colsB; // physical dimensions of B in layoutStore
-  std::size_t ldA = 0, ldB = 0; // leading dimensions of A and B, 0 when dense
+  LayoutKey a, b, c;
   bool operator==(const AlgoKey &o) const noexcept {
-    return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
-           rowsB == o.rowsB && colsB == o.colsB && ldA == o.ldA &&
-           ldB == o.ldB;
+    return dk == o.dk && a == o.a && b == o.b && c == o.c;
   }
 };
 
@@ -85,15 +71,11 @@ struct AlgoKeyHash {
   std::size_t operator()(const AlgoKey &k) const noexcept {
     std::size_t h = DescKeyHash{}(k.dk);
     auto mix = [&](std::size_t v) {
-      h ^= std::hash<std::size_t>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-           (h >> 2);
+      h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
     };
-    mix(k.rowsA);
-    mix(k.colsA);
-    mix(k.rowsB);
-    mix(k.colsB);
-    mix(k.ldA);
-    mix(k.ldB);
+    mix(LayoutKeyHash{}(k.a));
+    mix(LayoutKeyHash{}(k.b));
+    mix(LayoutKeyHash{}(k.c));
     return h;
   }
 };
@@ -108,10 +90,6 @@ template <class Api> class BlasLt {
 
   std::unordered_map<LayoutKey, typename Api::Layout, LayoutKeyHash>
       layoutStore;
-
-  // layouts of the operands with a leading dimension larger than the number of
-  // rows (padded or sub-matrix views); the dense ones are in layoutStore
-  std::unordered_map<LdKey, typename Api::Layout, LdKeyHash> ldLayoutStore;
 
   std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash> descStore;
 
@@ -157,14 +135,6 @@ public:
     for (auto &[key, layout] : layoutStore)
       if (layout)
         Api::layoutDestroy(layout);
-    for (auto &[key, layout] : ldLayoutStore)
-      if (layout)
-        Api::layoutDestroy(layout);
-    for (auto &[key, entry] : batchedStore) {
-      Api::layoutDestroy(entry.lA);
-      Api::layoutDestroy(entry.lB);
-      Api::layoutDestroy(entry.lC);
-    }
     for (auto &[key, desc] : descStore)
       if (desc)
         Api::descDestroy(desc);
@@ -195,37 +165,36 @@ public:
     }
   }
 
-  inline typename Api::Epilogue toApiEpilogue(Epilogue epilogue) {
-    switch (epilogue) {
-    case Epilogue::Bias:
-      return Api::EpilogueBias;
-    case Epilogue::ReluBias:
-      return Api::EpilogueReluBias;
-    case Epilogue::GeluBias:
-      return Api::EpilogueGeluBias;
-    case Epilogue::Relu:
-      return Api::EpilogueRelu;
-    case Epilogue::Default:
-      break;
-    }
-    return Api::EpilogueDefault;
-  }
-
   // Registers a call site's construction-time shape: creates the three matrix
   // layouts and resolves the multiply algorithm for them up front, so the
   // first call at this shape finds everything cached.
   void addOperationConfig(std::size_t m, std::size_t n, std::size_t k,
                           std::size_t lda, std::size_t ldb, std::size_t ldc,
                           char transa, char transb, Epilogue epilogue) {
-    const auto shapeA = layoutKeyA(transa, m, k);
-    const auto shapeB = layoutKeyB(transb, k, n);
-    const std::pair<std::size_t, std::size_t> shapeC{m, n};
-    getOrCreateLayout(shapeA, lda);
-    getOrCreateLayout(shapeB, ldb);
-    getOrCreateLayout(shapeC, ldc);
-
-    getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                     toApiEpilogue(epilogue), shapeA, shapeB, shapeC);
+    typename Api::Epilogue apiEpilogue = Api::EpilogueDefault;
+    switch (epilogue) {
+    case Epilogue::Bias:
+      apiEpilogue = Api::EpilogueBias;
+      break;
+    case Epilogue::ReluBias:
+      apiEpilogue = Api::EpilogueReluBias;
+      break;
+    case Epilogue::GeluBias:
+      apiEpilogue = Api::EpilogueGeluBias;
+      break;
+    case Epilogue::Relu:
+      apiEpilogue = Api::EpilogueRelu;
+      break;
+    case Epilogue::Default:
+      break;
+    }
+    const AlgoKey op{descKey(transa, transb, apiEpilogue),
+                     layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                     layoutKeyC(m, n)};
+    getOrCreateLayout(op.a, lda);
+    getOrCreateLayout(op.b, ldb);
+    getOrCreateLayout(op.c, ldc);
+    getOrComputeAlgo(op);
   }
 
   // Each multiply variant comes as one generic overload, where A, B, bias and
@@ -236,258 +205,113 @@ public:
   inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
                    unsigned int k, float alpha, TA const &A, TB const &B,
                    float beta, TBias &bias, TC &C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueBias, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
-                  alpaka::getPtrNative(C),
-                  static_cast<const void *>(alpaka::getPtrNative(bias)),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    gemm(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+         alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+         alpaka::getPtrNative(C));
   }
 
   template <typename T>
   inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
                    unsigned int k, float alpha, T const *A, T const *B,
                    float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n});
+    executeMatmul({descKey(transa, transb, Api::EpilogueBias),
+                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                   layoutKeyC(m, n)},
+                  &alpha, A, B, &beta, bias, C, bias);
   }
 
   template <typename TA, typename TB, typename TBias, typename TC>
   inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
                        unsigned int k, float alpha, TA const &A, TB const &B,
                        float beta, TBias &bias, TC &C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueReluBias, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
-                  alpaka::getPtrNative(C),
-                  static_cast<const void *>(alpaka::getPtrNative(bias)),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    gemmrelu(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+             alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+             alpaka::getPtrNative(C));
   }
 
   template <typename T>
   inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
                        unsigned int k, float alpha, T const *A, T const *B,
                        float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueReluBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n});
+    executeMatmul({descKey(transa, transb, Api::EpilogueReluBias),
+                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                   layoutKeyC(m, n)},
+                  &alpha, A, B, &beta, bias, C, bias);
   }
 
   template <typename TA, typename TB, typename TBias, typename TC>
   inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
                        unsigned int k, float alpha, TA const &A, TB const &B,
                        float beta, TBias &bias, TC &C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueGeluBias, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
-                  alpaka::getPtrNative(C),
-                  static_cast<const void *>(alpaka::getPtrNative(bias)),
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    gemmgelu(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+             alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+             alpaka::getPtrNative(C));
   }
 
   template <typename T>
   inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
                        unsigned int k, float alpha, T const *A, T const *B,
                        float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueGeluBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n});
+    executeMatmul({descKey(transa, transb, Api::EpilogueGeluBias),
+                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                   layoutKeyC(m, n)},
+                  &alpha, A, B, &beta, bias, C, bias);
   }
 
   template <typename TA, typename TB, typename TC>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, TA const &A, TB const &B,
                      float beta, TC &C) {
-    auto *c = alpaka::getPtrNative(C);
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    matmul(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+           alpaka::getPtrNative(B), beta, alpaka::getPtrNative(C));
   }
 
   template <typename T>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, T const *A, T const *B,
                      float beta, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    executeMatmul({descKey(transa, transb, Api::EpilogueDefault),
+                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                   layoutKeyC(m, n)},
+                  &alpha, A, B, &beta, C, C, nullptr);
   }
 
-  // Variants taking the leading dimensions lda and ldb of A and B (column-major,
-  // as the physical rows of the matrix: lda >= m for 'N', >= k for 'T'; ldb >= k
-  // for 'N', >= n for 'T'). C is dense.
-  template <typename T>
-  inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
-                   unsigned int k, float alpha, T const *A, unsigned int lda,
-                   T const *B, unsigned int ldb, float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n}, lda, ldb);
-  }
-
-  template <typename T>
-  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha, T const *A,
-                       unsigned int lda, T const *B, unsigned int ldb,
-                       float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueReluBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n}, lda, ldb);
-  }
-
-  template <typename T>
-  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha, T const *A,
-                       unsigned int lda, T const *B, unsigned int ldb,
-                       float beta, T *bias, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueGeluBias, &alpha, A, B, &beta, bias, C,
-                  static_cast<const void *>(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n}, lda, ldb);
-  }
-
-  template <typename T>
+  // int8 x int8 -> int32: the operands are quantized codes and the result is
+  // their exact accumulated dot product, for the caller to scale and
+  // requantize. alpha and beta are integers accordingly. A batchCount above
+  // 1 runs a strided batch, the strides counted in elements.
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
-                     unsigned int k, float alpha, T const *A, unsigned int lda,
-                     T const *B, unsigned int ldb, float beta, T *C) {
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  lda, ldb);
+                     unsigned int k, std::int32_t alpha, const std::int8_t *A,
+                     const std::int8_t *B, std::int32_t beta, std::int32_t *C,
+                     int batchCount = 1, std::int64_t strideA = 0,
+                     std::int64_t strideB = 0, std::int64_t strideC = 0) {
+    executeMatmul(
+        {descKey(transa, transb, Api::EpilogueDefault, Api::ComputeI32,
+                 Api::RealI32),
+         layoutKeyA(transa, m, k, Api::RealI8, batchCount, strideA),
+         layoutKeyB(transb, k, n, Api::RealI8, batchCount, strideB),
+         layoutKeyC(m, n, Api::RealI32, batchCount, strideC)},
+        &alpha, A, B, &beta, C, C, nullptr);
   }
 
-  template <typename TA, typename TB, typename TBias, typename TC>
-  inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
-                   unsigned int k, float alpha, TA const &A, unsigned int lda,
-                   TB const &B, unsigned int ldb, float beta, TBias &bias,
-                   TC &C) {
-    gemm(transa, transb, m, n, k, alpha,
-         static_cast<const float *>(alpaka::getPtrNative(A)), lda,
-         static_cast<const float *>(alpaka::getPtrNative(B)), ldb, beta,
-         static_cast<float *>(alpaka::getPtrNative(bias)),
-         static_cast<float *>(alpaka::getPtrNative(C)));
-  }
-
-  template <typename TA, typename TB, typename TBias, typename TC>
-  inline void gemmrelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha, TA const &A,
-                       unsigned int lda, TB const &B, unsigned int ldb,
-                       float beta, TBias &bias, TC &C) {
-    gemmrelu(transa, transb, m, n, k, alpha,
-             static_cast<const float *>(alpaka::getPtrNative(A)), lda,
-             static_cast<const float *>(alpaka::getPtrNative(B)), ldb, beta,
-             static_cast<float *>(alpaka::getPtrNative(bias)),
-             static_cast<float *>(alpaka::getPtrNative(C)));
-  }
-
-  template <typename TA, typename TB, typename TBias, typename TC>
-  inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
-                       unsigned int k, float alpha, TA const &A,
-                       unsigned int lda, TB const &B, unsigned int ldb,
-                       float beta, TBias &bias, TC &C) {
-    gemmgelu(transa, transb, m, n, k, alpha,
-             static_cast<const float *>(alpaka::getPtrNative(A)), lda,
-             static_cast<const float *>(alpaka::getPtrNative(B)), ldb, beta,
-             static_cast<float *>(alpaka::getPtrNative(bias)),
-             static_cast<float *>(alpaka::getPtrNative(C)));
-  }
-
-  template <typename TA, typename TB, typename TC>
-  inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
-                     unsigned int k, float alpha, TA const &A, unsigned int lda,
-                     TB const &B, unsigned int ldb, float beta, TC &C) {
-    matmul(transa, transb, m, n, k, alpha,
-           static_cast<const float *>(alpaka::getPtrNative(A)), lda,
-           static_cast<const float *>(alpaka::getPtrNative(B)), ldb, beta,
-           static_cast<float *>(alpaka::getPtrNative(C)));
-  }
-
-  // Batched multiply with a fused epilogue: for every batch b in
-  // [0, batchCount), C_b = epilogue(alpha * op(A_b) * op(B_b) + beta * C_b +
-  // bias_b), with X_b = X + b * strideX (strides in elements, column-major
-  // matrices with leading dimensions lda, ldb, ldc). A stride of 0 shares the
-  // matrix between the batches (broadcast). bias is a vector with one element per
-  // row of C (m), bias_b = bias + b * strideBias; Epilogue::Bias adds the bias, 
-  // ReluBias and GeluBias also apply the activation.
-  inline void gemmStridedBatched(char transa, char transb, int m, int n, int k,
-                                 float alpha, const float *A, int lda,
-                                 long long strideA, const float *B, int ldb,
-                                 long long strideB, float beta, float *C,
-                                 int ldc, long long strideC, int batchCount,
-                                 Epilogue epilogue, const float *bias,
-                                 long long strideBias = 0) {
-    if (batchCount < 1)
-      throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    const auto epi = toApiEpilogue(epilogue);
-    if constexpr (!Api::SupportsBiasBatchStride) {
-      if (epi != Api::EpilogueDefault && strideBias != 0 && batchCount > 1) {
-        for (int b = 0; b < batchCount; ++b)
-          gemmStridedBatched(transa, transb, m, n, k, alpha, A + b * strideA,
-                             lda, 0, B + b * strideB, ldb, 0, beta,
-                             C + b * strideC, ldc, 0, 1, epilogue,
-                             bias + b * strideBias, 0);
-        return;
-      }
-    }
-    const auto opA = charToTranspose(transa);
-    const auto opB = charToTranspose(transb);
-    const auto shapeA = layoutKeyA(transa, m, k);
-    const auto shapeB = layoutKeyB(transb, k, n);
-    if (static_cast<std::size_t>(lda) < shapeA.first ||
-        static_cast<std::size_t>(ldb) < shapeB.first ||
-        static_cast<std::size_t>(ldc) < static_cast<std::size_t>(m))
-      throw std::invalid_argument(
-          "sofieBLAS: leading dimension smaller than the number of rows of "
-          "the matrix.");
-
-    BatchKey key{(long long)opA,    (long long)opB,    (long long)epi,
-                 (long long)m,      (long long)n,      (long long)k,
-                 (long long)lda,    (long long)ldb,    (long long)ldc,
-                 strideA,           strideB,           strideC,
-                 (long long)batchCount};
-    auto it = batchedStore.find(key);
-    if (it == batchedStore.end()) {
-      BatchedEntry e{};
-      e.lA = createBatchedLayout(shapeA, lda, strideA, batchCount);
-      e.lB = createBatchedLayout(shapeB, ldb, strideB, batchCount);
-      e.lC = createBatchedLayout({(std::size_t)m, (std::size_t)n}, ldc,
-                                 strideC, batchCount);
-      auto &desc = getOrCreateDesc(opA, opB, epi);
-      int returned = 0;
-      SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc, e.lA, e.lB, e.lC,
-                                           e.lC, preference, 1, &e.h,
-                                           &returned));
-      if (returned == 0) {
-        std::cerr << "[sofieBLAS] No suitable " << Api::name
-                  << " algorithm found for the batched multiply m=" << m
-                  << " n=" << n << " k=" << k << " batchCount=" << batchCount
-                  << " strideA=" << strideA << " strideB=" << strideB << "\n";
-        exit(EXIT_FAILURE);
-      }
-      it = batchedStore.emplace(key, e).first;
-    }
-    auto &e = it->second;
-
-    auto &desc = getOrCreateDesc(opA, opB, epi);
-    if (epi != Api::EpilogueDefault) {
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
-                                               &bias, sizeof(bias)));
-      if constexpr (Api::SupportsBiasBatchStride) {
-        std::int64_t biasStride = strideBias;
-        SOFIEBLAS_CHECK_LT(Api::descSetAttribute(
-            desc, Api::DescBiasBatchStride, &biasStride, sizeof(biasStride)));
-      }
-    }
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, e.lA, B, e.lB,
-                                   &beta, C, e.lC, C, e.lC, &e.h.algo,
-                                   d_workspace, workspaceSize, stream));
+  // Whether the library has a kernel for the matmul above at this shape,
+  // registering its layouts and algorithm when it does. Unlike the float
+  // addOperationConfig this never ends the process: a caller with a
+  // fallback reads the answer.
+  inline bool addOperationConfig(char transa, char transb, std::size_t m,
+                                 std::size_t n, std::size_t k, DataType in,
+                                 DataType out, int batchCount = 1,
+                                 std::int64_t strideA = 0,
+                                 std::int64_t strideB = 0,
+                                 std::int64_t strideC = 0) {
+    const auto compute = in == DataType::I8 ? Api::ComputeI32 : Api::ComputeF32;
+    const auto scaleType = in == DataType::I8 ? Api::RealI32 : Api::RealF32;
+    const AlgoKey op{
+        descKey(transa, transb, Api::EpilogueDefault, compute, scaleType),
+        layoutKeyA(transa, m, k, realType(in), batchCount, strideA),
+        layoutKeyB(transb, k, n, realType(in), batchCount, strideB),
+        layoutKeyC(m, n, realType(out), batchCount, strideC)};
+    return getOrComputeAlgo(op, /*tolerateMissing=*/true) != nullptr;
   }
 
   inline void gemmStridedBatched(char transa, char transb, int m, int n, int k,
@@ -501,169 +325,104 @@ public:
         batchCount));
   }
 
-  template <typename TA, typename TB, typename TC>
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         TA const &A, TB const &B, TC &C) {
-    const int32_t alpha = 1, beta = 0;
-    auto *c = alpaka::getPtrNative(C);
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  Api::ComputeI32, Api::RealI32, Api::RealI8, Api::RealI32);
-  }
-
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         const int8_t *A, const int8_t *B, int32_t *C) {
-    const int32_t alpha = 1, beta = 0;
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  Api::ComputeI32, Api::RealI32, Api::RealI8, Api::RealI32);
-  }
-
-  template <typename TA, typename TB, typename TBias, typename TC>
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k, float alpha,
-                         TA const &A, TB const &B, TBias &bias, TC &C,
-                         Epilogue epilogue) {
-    const float beta = 0.f;
-    auto *c = alpaka::getPtrNative(C);
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c,
-                  alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
-                  Api::RealF32, Api::RealI8, Api::RealI8);
-  }
-
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k, float alpha,
-                         const int8_t *A, const int8_t *B, const float *bias,
-                         int8_t *C, Epilogue epilogue) {
-    const float beta = 0.f;
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8);
-  }
-
-  // Checks whether the library has a kernel for the int8-output int8Matmul
-  // above (int8 A, B and C, float alpha and bias) with these transposes,
-  // sizes and epilogue. Returns false instead of ending the process when it
-  // has none, so the caller can take another path, such as the int32-output
-  // int8Matmul.
-  inline bool int8MatmulSupported(char transa, char transb, unsigned int m,
-                                  unsigned int n, unsigned int k,
-                                  Epilogue epilogue) {
-    return getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                            toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
-                            layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
-                            Api::RealF32, Api::RealI8, Api::RealI8,
-                            /*exitOnNoAlgorithm=*/false) != nullptr;
-  }
-
 private:
   typename Api::Queue m_queue;
 
-  static typename Api::Epilogue toApiEpilogue(Epilogue epilogue) {
-    switch (epilogue) {
-    case Epilogue::Bias:
-      return Api::EpilogueBias;
-    case Epilogue::ReluBias:
-      return Api::EpilogueReluBias;
-    case Epilogue::GeluBias:
-      return Api::EpilogueGeluBias;
-    case Epilogue::Default:
+  // Identities of the three operands of D = op(A) * op(B), as stored. A is
+  // m x k and B is k x n after the transposes; C and D are m x n.
+  static LayoutKey layoutKeyA(char trans, std::size_t m, std::size_t k,
+                              decltype(Api::RealF32) type = Api::RealF32,
+                              int batchCount = 1,
+                              std::int64_t batchStride = 0) {
+    const bool n = (trans == 'N' || trans == 'n');
+    return {static_cast<int>(type), n ? m : k, n ? k : m, batchCount,
+            batchStride};
+  }
+
+  static LayoutKey layoutKeyB(char trans, std::size_t k, std::size_t n,
+                              decltype(Api::RealF32) type = Api::RealF32,
+                              int batchCount = 1,
+                              std::int64_t batchStride = 0) {
+    const bool nn = (trans == 'N' || trans == 'n');
+    return {static_cast<int>(type), nn ? k : n, nn ? n : k, batchCount,
+            batchStride};
+  }
+
+  static LayoutKey layoutKeyC(std::size_t m, std::size_t n,
+                              decltype(Api::RealF32) type = Api::RealF32,
+                              int batchCount = 1,
+                              std::int64_t batchStride = 0) {
+    return {static_cast<int>(type), m, n, batchCount, batchStride};
+  }
+
+  static decltype(Api::RealF32) realType(DataType type) {
+    switch (type) {
+    case DataType::I8:
+      return Api::RealI8;
+    case DataType::I32:
+      return Api::RealI32;
+    case DataType::F32:
       break;
     }
-    return Api::EpilogueDefault;
+    return Api::RealF32;
   }
 
-  // the configuration of a batched multiply: transposes, epilogue, m, n, k,
-  // the leading dimensions, the three strides and the batch count
-  using BatchKey = std::array<long long, 13>;
-  struct BatchedEntry {
-    typename Api::Layout lA = nullptr, lB = nullptr, lC = nullptr;
-    typename Api::HeuristicResult h{};
-  };
-  std::map<BatchKey, BatchedEntry> batchedStore;
-
-  typename Api::Layout
-  createBatchedLayout(const std::pair<std::size_t, std::size_t> &shape,
-                      std::size_t ld, long long stride, int batchCount) {
-    typename Api::Layout layout = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, Api::RealF32, shape.first,
-                                         shape.second, ld));
-    std::int32_t count = batchCount;
-    std::int64_t offset = stride;
-    SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(
-        layout, Api::LayoutBatchCount, &count, sizeof(count)));
-    SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(
-        layout, Api::LayoutStridedBatchOffset, &offset, sizeof(offset)));
-    return layout;
+  DescKey descKey(char transa, char transb, typename Api::Epilogue epilogue,
+                  decltype(Api::ComputeF32) compute = Api::ComputeF32,
+                  decltype(Api::RealF32) scaleType = Api::RealF32,
+                  int biasType = -1) {
+    return {static_cast<int>(charToTranspose(transa)),
+            static_cast<int>(charToTranspose(transb)),
+            static_cast<int>(epilogue),
+            static_cast<int>(compute),
+            static_cast<int>(scaleType),
+            biasType};
   }
 
-  static std::pair<std::size_t, std::size_t>
-  layoutKeyA(char trans, std::size_t m, std::size_t k) {
-    return (trans == 'N' || trans == 'n') ? std::make_pair(m, k)
-                                          : std::make_pair(k, m);
-  }
-
-  static std::pair<std::size_t, std::size_t>
-  layoutKeyB(char trans, std::size_t k, std::size_t n) {
-    return (trans == 'N' || trans == 'n') ? std::make_pair(k, n)
-                                          : std::make_pair(n, k);
-  }
-
-  // Returns the layout describing a (rows, cols) matrix with leading dimension
-  // ld (column-major), creating and caching it on first use. The dense layouts
-  // (ld = rows) are keyed by the shape alone, the others also by ld.
-  typename Api::Layout
-  getOrCreateLayout(const std::pair<std::size_t, std::size_t> &shape,
-                    std::size_t ld, decltype(Api::RealF32) type = Api::RealF32) {
-    if (ld < shape.first)
-      throw std::invalid_argument(
-          std::string("sofieBLAS: leading dimension ") + std::to_string(ld) +
-          " is smaller than the number of rows " + std::to_string(shape.first) +
-          " of the matrix.");
-    if (ld == shape.first) {
-      const LayoutKey key{static_cast<int>(type), shape.first, shape.second};
-      auto it = layoutStore.find(key);
-      if (it != layoutStore.end())
-        return it->second;
-      typename Api::Layout layout = nullptr;
-      SOFIEBLAS_CHECK_LT(
-          Api::layoutCreate(&layout, type, shape.first, shape.second, ld));
-      layoutStore.emplace(key, layout);
-      return layout;
-    }
-    LdKey key{static_cast<int>(type), shape.first, shape.second, ld};
-    auto it = ldLayoutStore.find(key);
-    if (it != ldLayoutStore.end())
+  // Returns the layout a key describes, creating and caching it on first
+  // use. Every caller passes ld = rows (dense column-major). A batchCount
+  // above 1 describes a strided batch.
+  typename Api::Layout getOrCreateLayout(const LayoutKey &key,
+                                         std::size_t ld) {
+    auto it = layoutStore.find(key);
+    if (it != layoutStore.end())
       return it->second;
     typename Api::Layout layout = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, type, shape.first,
-                                         shape.second, ld));
-    ldLayoutStore.emplace(key, layout);
+    const auto type = static_cast<decltype(Api::RealF32)>(key.type);
+    SOFIEBLAS_CHECK_LT(
+        Api::layoutCreate(&layout, type, key.rows, key.cols, ld));
+    if (key.batchCount > 1) {
+      if (key.batchStride <= 0)
+        throw std::invalid_argument(
+            "A strided batch needs a positive batch stride.");
+      const std::int32_t count = key.batchCount;
+      SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(layout, Api::LayoutBatchCount,
+                                                 &count, sizeof(count)));
+      SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(layout, Api::LayoutBatchStride,
+                                                 &key.batchStride,
+                                                 sizeof(key.batchStride)));
+    }
+    layoutStore.emplace(key, layout);
     return layout;
   }
 
-  typename Api::MatmulDesc &
-  getOrCreateDesc(typename Api::Operation transA, typename Api::Operation transB,
-                  typename Api::Epilogue epilogue,
-                  decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                  decltype(Api::RealF32) scaleType = Api::RealF32) {
-    DescKey key{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                (int)scaleType};
+  // Returns the descriptor a key describes, creating and caching it on first
+  // use. compute is the accumulation type, scaleType the type alpha and beta
+  // are given in, biasType the bias vector's type or -1 to leave the library
+  // default (the output type).
+  typename Api::MatmulDesc &getOrCreateDesc(const DescKey &key) {
     auto it = descStore.find(key);
     if (it != descStore.end())
       return it->second;
 
+    const auto transA = static_cast<typename Api::Operation>(key.transA);
+    const auto transB = static_cast<typename Api::Operation>(key.transB);
+    const auto epilogue = static_cast<typename Api::Epilogue>(key.epilogue);
+    const auto compute = static_cast<decltype(Api::ComputeF32)>(key.compute);
+    const auto scaleType = static_cast<decltype(Api::RealF32)>(key.scaleType);
+
     typename Api::MatmulDesc desc = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, computeType, scaleType));
+    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, compute, scaleType));
     SOFIEBLAS_CHECK_LT(
         Api::descSetAttribute(desc, Api::DescTransA, &transA, sizeof(transA)));
     SOFIEBLAS_CHECK_LT(
@@ -671,45 +430,28 @@ private:
     SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescEpilogue, &epilogue,
                                              sizeof(epilogue)));
     // For bias epilogues: set a non-null dummy pointer so the descriptor is
-    // valid for the heuristic query, and give the bias the scale type (FP8
-    // will need BF16 here).
-    if (epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu) {
+    // valid for the heuristic query.
+    if (epilogue != Api::EpilogueDefault) {
       const void *dummy = d_workspace;
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &dummy, sizeof(dummy)));
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasDataType,
-                                               &scaleType, sizeof(scaleType)));
+    }
+    if (key.biasType >= 0) {
+      const auto biasType = static_cast<decltype(Api::RealF32)>(key.biasType);
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(
+          desc, Api::DescBiasDataType, &biasType, sizeof(biasType)));
     }
     descStore.emplace(key, desc);
     return descStore.at(key);
   }
 
-  typename Api::HeuristicResult *
-  getOrComputeAlgo(typename Api::Operation transA,
-                   typename Api::Operation transB,
-                   typename Api::Epilogue epilogue,
-                   const std::pair<std::size_t, std::size_t> &shapeA,
-                   const std::pair<std::size_t, std::size_t> &shapeB,
-                   const std::pair<std::size_t, std::size_t> &shapeC,
-                   std::size_t ldA = 0, std::size_t ldB = 0,
-                   decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                   decltype(Api::RealF32) scaleType = Api::RealF32,
-                   decltype(Api::RealF32) typeAB = Api::RealF32,
-                   decltype(Api::RealF32) typeC = Api::RealF32,
-                   bool exitOnNoAlgorithm = true) {
-    // ldA/ldB are 0 for dense operands
-    if (ldA == shapeA.first)
-      ldA = 0;
-    if (ldB == shapeB.first)
-      ldB = 0;
-    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                 (int)scaleType},
-                shapeA.first,
-                shapeA.second,
-                shapeB.first,
-                shapeB.second,
-                ldA,
-                ldB};
+  // Returns the algorithm for one operation, querying the heuristic and
+  // caching the answer on first use. With tolerateMissing the two ways the
+  // library can decline (an unsupported configuration, or no kernel for the
+  // shape) return nullptr instead of ending the process, so a caller with a
+  // fallback can take it.
+  typename Api::HeuristicResult *getOrComputeAlgo(const AlgoKey &key,
+                                                  bool tolerateMissing = false) {
     auto it = algoCache.find(key);
     if (it != algoCache.end()) {
       if (algoCacheLimit)
@@ -717,27 +459,26 @@ private:
       return &it->second.h;
     }
 
-    auto &desc =
-        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
-    auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
-    auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
+    auto &desc = getOrCreateDesc(key.dk);
+    auto lA = getOrCreateLayout(key.a, key.a.rows);
+    auto lB = getOrCreateLayout(key.b, key.b.rows);
+    auto lC = getOrCreateLayout(key.c, key.c.rows);
     typename Api::HeuristicResult h{};
     int returnedResults = 0;
     const auto status = Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
                                           preference, 1, &h, &returnedResults);
-    if (!exitOnNoAlgorithm && status == Api::StatusNotSupported)
+    if (tolerateMissing && status == Api::StatusNotSupported)
       return nullptr;
     SOFIEBLAS_CHECK_LT(status);
     if (returnedResults == 0) {
-      if (!exitOnNoAlgorithm)
+      if (tolerateMissing)
         return nullptr;
       std::cerr << "[sofieBLAS] No suitable " << Api::name
                 << " algorithm found for "
-                << "transA=" << transA << " transB=" << transB
-                << " epilogue=" << epilogue << " A=[" << shapeA.first << "x"
-                << shapeA.second << "]"
-                << " B=[" << shapeB.first << "x" << shapeB.second << "]\n";
+                << "transA=" << key.dk.transA << " transB=" << key.dk.transB
+                << " epilogue=" << key.dk.epilogue << " A=[" << key.a.rows
+                << "x" << key.a.cols << "]"
+                << " B=[" << key.b.rows << "x" << key.b.cols << "]\n";
       exit(EXIT_FAILURE);
     }
     auto ins = algoCache.emplace(key, CacheEntry{h, {}}).first;
@@ -749,39 +490,29 @@ private:
         lruOrder.pop_back();
       }
     }
-    return &ins->second.h;
+    return ins->second.h;
   }
 
-  void executeMatmul(typename Api::Operation transA,
-                     typename Api::Operation transB,
-                     typename Api::Epilogue epilogue, const void *alpha,
-                     const void *A, const void *B, const void *beta,
-                     const void *D_in, void *C_out, const void *bias_ptr,
-                     const std::pair<std::size_t, std::size_t> &shapeA,
-                     const std::pair<std::size_t, std::size_t> &shapeB,
-                     const std::pair<std::size_t, std::size_t> &shapeC,
-                     std::size_t ldA = 0, std::size_t ldB = 0,
-                     decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                     decltype(Api::RealF32) scaleType = Api::RealF32,
-                     decltype(Api::RealF32) typeAB = Api::RealF32,
-                     decltype(Api::RealF32) typeC = Api::RealF32) {
-    // Retrieve (or lazily compute) the cached algorithm for this shape
-    auto *h = getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC,
-                               ldA, ldB, computeType, scaleType, typeAB, typeC);
+  // Runs one operation: alpha and beta point at scalars of the descriptor's
+  // scale type, C_in is read when beta is nonzero, D_out receives the result.
+  void executeMatmul(const AlgoKey &op, const void *alpha, const void *A,
+                     const void *B, const void *beta, const void *C_in,
+                     void *D_out, const void *bias_ptr) {
+    // Retrieve (or lazily compute) the cached algorithm for this operation
+    auto *h = getOrComputeAlgo(op);
 
     // Retrieve the cached descriptor and patch the real bias pointer in-place
-    auto &desc =
-        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
+    auto &desc = getOrCreateDesc(op.dk);
     if (bias_ptr) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
     }
 
-    auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
-    auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
+    auto lA = getOrCreateLayout(op.a, op.a.rows);
+    auto lB = getOrCreateLayout(op.b, op.b.rows);
+    auto lC = getOrCreateLayout(op.c, op.c.rows);
     SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, alpha, A, lA, B, lB, beta,
-                                   D_in, lC, C_out, lC, &h->algo, d_workspace,
+                                   C_in, lC, D_out, lC, &h->algo, d_workspace,
                                    workspaceSize, stream));
   }
 };
