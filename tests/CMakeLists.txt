@@ -33,6 +33,7 @@ if(SOFIEBLAS_CUDA_ENABLED)
   )
 
   target_compile_definitions(test_cuda PRIVATE ALPAKA_ACC_GPU_CUDA_ENABLED)
+  target_include_directories(test_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(test_cuda PRIVATE
     sofieBLAS::sofieBLAS alpaka::alpaka CUDA::cudart CUDA::cublas CUDA::cublasLt)
 
@@ -51,7 +52,7 @@ if(SOFIEBLAS_HIP_ENABLED)
   target_compile_options(test_hip PRIVATE ${CXXFLAGS} ${CXX_HOST_FLAGS})
 
   target_compile_definitions(test_hip PRIVATE ALPAKA_ACC_GPU_HIP_ENABLED)
-  target_include_directories(test_hip PRIVATE ${ROCM_BASE}/include)
+  target_include_directories(test_hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${ROCM_BASE}/include)
   target_link_directories(test_hip PRIVATE ${ROCM_BASE}/lib)
   target_link_libraries(test_hip PRIVATE
     sofieBLAS::sofieBLAS alpaka::alpaka hipblaslt hipblas amdhip64)
