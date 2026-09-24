@@ -122,7 +122,13 @@ public:
     for (auto &[key, layout] : layoutStore)
       if (layout)
         Api::layoutDestroy(layout);
+    for (auto &[key, layout] : i8LayoutStore)
+      if (layout)
+        Api::layoutDestroy(layout);
     for (auto &[key, desc] : descStore)
+      if (desc)
+        Api::descDestroy(desc);
+    for (auto &[key, desc] : i8DescStore)
       if (desc)
         Api::descDestroy(desc);
     if (preference)
@@ -389,7 +395,150 @@ private:
     return ins->second.h;
   }
 
-  void executeMatmul(typename Api::Operation transA,
+  std::unordered_map<std::pair<std::size_t, std::size_t>, typename Api::Layout,
+                     PairHash, PairEq>
+      i8LayoutStore;
+
+  std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash> i8DescStore;
+
+  struct I8CacheEntry {
+    typename Api::HeuristicResult h{};
+    std::list<AlgoKey>::iterator lru{};
+  };
+  std::unordered_map<AlgoKey, I8CacheEntry, AlgoKeyHash> i8AlgoCache;
+  std::list<AlgoKey> i8LruOrder;
+
+  typename Api::Layout
+  getOrCreateI8Layout(const std::pair<std::size_t, std::size_t> &shape,
+                      std::size_t ld, bool isOutput) {
+    auto it = i8LayoutStore.find(shape);
+    if (it != i8LayoutStore.end())
+      return it->second;
+    typename Api::Layout layout = nullptr;
+    auto dtype = isOutput ? Api::RealI32 : Api::RealI8;
+    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, dtype,
+                                         shape.first, shape.second, ld));
+    i8LayoutStore.emplace(shape, layout);
+    return layout;
+  }
+
+  typename Api::MatmulDesc &
+  getOrCreateI8Desc(typename Api::Operation transA,
+                    typename Api::Operation transB) {
+    DescKey key{(int)transA, (int)transB, /*epilogue=*/0};
+    auto it = i8DescStore.find(key);
+    if (it != i8DescStore.end())
+      return it->second;
+
+    typename Api::MatmulDesc desc = nullptr;
+    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, Api::ComputeI32, Api::RealI32));
+    SOFIEBLAS_CHECK_LT(
+        Api::descSetAttribute(desc, Api::DescTransA, &transA, sizeof(transA)));
+    SOFIEBLAS_CHECK_LT(
+        Api::descSetAttribute(desc, Api::DescTransB, &transB, sizeof(transB)));
+    i8DescStore.emplace(key, desc);
+    return i8DescStore.at(key);
+  }
+
+  typename Api::HeuristicResult &
+  getOrComputeI8Algo(typename Api::Operation transA,
+                     typename Api::Operation transB,
+                     const std::pair<std::size_t, std::size_t> &shapeA,
+                     const std::pair<std::size_t, std::size_t> &shapeB,
+                     const std::pair<std::size_t, std::size_t> &shapeC) {
+    AlgoKey key{{(int)transA, (int)transB, /*epilogue=*/0},
+                shapeA.first, shapeA.second,
+                shapeB.first, shapeB.second};
+    auto it = i8AlgoCache.find(key);
+    if (it != i8AlgoCache.end()) {
+      if (algoCacheLimit)
+        i8LruOrder.splice(i8LruOrder.begin(), i8LruOrder, it->second.lru);
+      return it->second.h;
+    }
+
+    auto &desc = getOrCreateI8Desc(transA, transB);
+    auto lA = getOrCreateI8Layout(shapeA, shapeA.first, /*isOutput=*/false);
+    auto lB = getOrCreateI8Layout(shapeB, shapeB.first, /*isOutput=*/false);
+
+    auto outKey = std::make_pair(shapeC.first + (std::size_t(1) << 48),
+                                shapeC.second);
+    auto lC_it = i8LayoutStore.find(outKey);
+    typename Api::Layout lC = nullptr;
+    if (lC_it != i8LayoutStore.end()) {
+      lC = lC_it->second;
+    } else {
+      SOFIEBLAS_CHECK_LT(Api::layoutCreate(&lC, Api::RealI32,
+                                           shapeC.first, shapeC.second,
+                                           shapeC.first));
+      i8LayoutStore.emplace(outKey, lC);
+    }
+
+    typename Api::HeuristicResult h{};
+    int returnedResults = 0;
+    SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
+                                         preference, 1, &h, &returnedResults));
+    if (returnedResults == 0) {
+      std::cerr << "[sofieBLAS] No suitable " << Api::name
+                << " INT8 algorithm found for "
+                << "A=[" << shapeA.first << "x" << shapeA.second << "]"
+                << " B=[" << shapeB.first << "x" << shapeB.second << "]\n";
+      exit(EXIT_FAILURE);
+    }
+    auto ins = i8AlgoCache.emplace(key, I8CacheEntry{h, {}}).first;
+    if (algoCacheLimit) {
+      i8LruOrder.push_front(key);
+      ins->second.lru = i8LruOrder.begin();
+      while (i8AlgoCache.size() > algoCacheLimit) {
+        i8AlgoCache.erase(i8LruOrder.back());
+        i8LruOrder.pop_back();
+      }
+    }
+    return ins->second.h;
+  }
+
+  void executeI8Matmul(typename Api::Operation transA,
+                       typename Api::Operation transB,
+                       const int8_t *A, const int8_t *B,
+                       int32_t *C,
+                       const std::pair<std::size_t, std::size_t> &shapeA,
+                       const std::pair<std::size_t, std::size_t> &shapeB,
+                       const std::pair<std::size_t, std::size_t> &shapeC) {
+    auto &h = getOrComputeI8Algo(transA, transB, shapeA, shapeB, shapeC);
+    auto &desc = getOrCreateI8Desc(transA, transB);
+
+    auto lA = getOrCreateI8Layout(shapeA, shapeA.first, false);
+    auto lB = getOrCreateI8Layout(shapeB, shapeB.first, false);
+    auto outKey = std::make_pair(shapeC.first + (std::size_t(1) << 48),
+                                shapeC.second);
+    auto lC = i8LayoutStore.at(outKey);
+
+    int32_t alpha = 1, beta = 0;
+    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
+                                   C, lC, C, lC, &h.algo, d_workspace,
+                                   workspaceSize, stream));
+  }
+
+public:
+  template <typename TA, typename TB, typename TC>
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k,
+                         TA const &A, TB const &B, TC &C) {
+    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
+                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(A)),
+                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(B)),
+                    reinterpret_cast<int32_t *>(alpaka::getPtrNative(C)),
+                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k,
+                         const int8_t *A, const int8_t *B, int32_t *C) {
+    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
+                    A, B, C,
+                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+private:
                      typename Api::Operation transB,
                      typename Api::Epilogue epilogue, float alpha,
                      const float *A, const float *B, float beta,

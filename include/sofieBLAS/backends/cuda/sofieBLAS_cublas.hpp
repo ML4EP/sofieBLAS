@@ -54,7 +54,10 @@ struct CublasLtApi {
   static constexpr auto EpilogueReluBias = CUBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = CUBLASLT_EPILOGUE_GELU_BIAS;
   static constexpr auto ComputeF32 = CUBLAS_COMPUTE_32F;
+  static constexpr auto ComputeI32 = CUBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = CUDA_R_32F;
+  static constexpr auto RealI8  = CUDA_R_8I;
+  static constexpr auto RealI32 = CUDA_R_32I;
   static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;

@@ -54,7 +54,10 @@ struct HipblasLtApi {
   static constexpr auto EpilogueReluBias = HIPBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = HIPBLASLT_EPILOGUE_GELU_BIAS;
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
+  static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
+  static constexpr auto RealI8  = HIP_R_8I;
+  static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
