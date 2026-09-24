@@ -1,121 +1,151 @@
 #include "sofieBLAS/sofieBLAS.hpp"
 #include <alpaka/alpaka.hpp>
 
+#include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <random>
+#include <string>
+#include <vector>
 
-// index and size type
 using Idx = uint32_t;
-
-// dimensions
-using Dim0D = alpaka::DimInt<0u>;
 using Dim1D = alpaka::DimInt<1u>;
-using Dim2D = alpaka::DimInt<2u>;
-using Dim3D = alpaka::DimInt<3u>;
 
-// Print a column-major matrix
-template <typename T, typename TIdx>
-void print(alpaka::BufCpu<T, Dim1D, TIdx> const &M, TIdx size) {
-  assert(alpaka::getExtentProduct(M) == size * size);
+// ---------------------------------------------------------------------------
+// Reference implementations (column-major, float)
+// ---------------------------------------------------------------------------
+static inline float cm(const float *M, int row, int col, int ld) {
+  return M[col * ld + row];
+}
 
-  for (TIdx row = 0; row < size; ++row) {
-    for (TIdx col = 0; col < size; ++col) {
-      std::cout << std::fixed << std::setprecision(2) << std::setw(7)
-                << M[col * size + row] << " ";
+// C = alpha * op(A) * op(B) + beta * C  (in-place, column-major)
+static void refMatmul(float *C, const float *A, const float *B, int m, int n,
+                      int k, float alpha, float beta, bool transA,
+                      bool transB) {
+  int lda = transA ? k : m;
+  int ldb = transB ? n : k;
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < m; ++i) {
+      float sum = 0.f;
+      for (int p = 0; p < k; ++p) {
+        float a = transA ? cm(A, p, i, lda) : cm(A, i, p, lda);
+        float b = transB ? cm(B, j, p, ldb) : cm(B, p, j, ldb);
+        sum += a * b;
+      }
+      C[j * m + i] = alpha * sum + beta * C[j * m + i];
     }
-    std::cout << "\n";
   }
 }
 
-int main() {
-  constexpr Idx size = 4;
-
-  // Host platform and device
-  alpaka::PlatformCpu host_platform{};
-  auto host = alpaka::getDevByIdx(host_platform, 0u);
-
-  // Allocate matrices (column-major)
-  auto A = alpaka::allocBuf<float, Idx>(host, size * size);
-  auto B = alpaka::allocBuf<float, Idx>(host, size * size);
-  auto C = alpaka::allocBuf<float, Idx>(host, size * size);
-
-  // Fill A and B with random floats centered around 0
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::normal_distribution<float> dist(0.0f, 10.0f);
-
-  for (int i = 0; i < size * size; ++i) {
-    A[i] = dist(gen);
-    B[i] = dist(gen);
+// C = alpha * op(A) * op(B) + beta * bias_matrix + bias_vec (per-row broadcast)
+static void refGemm(float *C, const float *A, const float *B, const float *bias,
+                    int m, int n, int k, float alpha, float beta, bool transA,
+                    bool transB) {
+  int lda = transA ? k : m;
+  int ldb = transB ? n : k;
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < m; ++i) {
+      float sum = 0.f;
+      for (int p = 0; p < k; ++p) {
+        float a = transA ? cm(A, p, i, lda) : cm(A, i, p, lda);
+        float b = transB ? cm(B, j, p, ldb) : cm(B, p, j, ldb);
+        sum += a * b;
+      }
+      C[j * m + i] = alpha * sum + beta * bias[j * m + i] + bias[i];
+    }
   }
-  std::cout << "Matrix A:\n";
-  print(A, size);
-  std::cout << '\n';
-  std::cout << "Matrix B:\n";
-  print(B, size);
-  std::cout << '\n';
+}
 
-#ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
-  {
-    alpaka::PlatformCudaRt platform;
-    alpaka::DevCudaRt device = alpaka::getDevByIdx(platform, 0u);
-    alpaka::Queue<alpaka::DevCudaRt, alpaka::NonBlocking> queue{device};
+static void refGemmRelu(float *C, const float *A, const float *B,
+                        const float *bias, int m, int n, int k, float alpha,
+                        float beta, bool transA, bool transB) {
+  refGemm(C, A, B, bias, m, n, k, alpha, beta, transA, transB);
+  for (int i = 0; i < m * n; ++i)
+    C[i] = C[i] > 0.f ? C[i] : 0.f;
+}
 
-    const Idx m = size; // rows of A and C
-    const Idx n = size; // columns of B and C
-    const Idx k = size; // columns of A and rows of B
+static void refGemmGelu(float *C, const float *A, const float *B,
+                        const float *bias, int m, int n, int k, float alpha,
+                        float beta, bool transA, bool transB) {
+  refGemm(C, A, B, bias, m, n, k, alpha, beta, transA, transB);
+  constexpr float kInvSqrt2 = 0.7071067811865476f;
+  for (int i = 0; i < m * n; ++i)
+    C[i] *= 0.5f * (1.f + std::erff(C[i] * kInvSqrt2));
+}
 
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
+static int gFailures = 0;
 
-    const Idx lda = size; // leading dimension of A
-    const Idx ldb = size; // leading dimension of B
-    const Idx ldc = size;
-
-    auto A_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-    auto B_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-    auto C_d = alpaka::allocAsyncBuf<float, Idx>(queue, size * size);
-    alpaka::memcpy(queue, A_d, A);
-    alpaka::memcpy(queue, B_d, B);
-
-    sofieBLAS<alpaka::TagGpuCudaRt> blas(queue);
-    blas.gemm('n', 'n', m, n, k, alpha, A_d, lda, B_d, ldb, beta, C_d, ldc);
-    alpaka::memcpy(queue, C, C_d);
-
-    alpaka::wait(queue);
-    std::cout << "CUDA Matrix C = A × B:\n";
-    print(C, size);
-    std::cout << '\n';
+static void checkClose(const float *got, const float *expected, int n,
+                       const std::string &name, float rtol = 1e-4f,
+                       float atol = 1e-4f) {
+  bool pass = true;
+  for (int i = 0; i < n; ++i) {
+    float diff = std::abs(got[i] - expected[i]);
+    float thr = atol + rtol * std::abs(expected[i]);
+    if (diff > thr) {
+      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
+                << " expected=" << expected[i] << " diff=" << diff << "\n";
+      pass = false;
+    }
   }
-#endif
+  if (pass)
+    std::cout << "  PASS  " << name << "\n";
+  else
+    ++gFailures;
+}
+
+static void fillSeq(float *M, int n, float start = 1.f, float step = 1.f) {
+  for (int i = 0; i < n; ++i)
+    M[i] = start + static_cast<float>(i) * step;
+}
+
+static void fillVal(float *M, int n, float v) {
+  for (int i = 0; i < n; ++i)
+    M[i] = v;
+}
+
+// ---------------------------------------------------------------------------
+// CPU tests
+// ---------------------------------------------------------------------------
 
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
-  {
-    alpaka::PlatformCpu platform;
-    alpaka::DevCpu device = alpaka::getDevByIdx(platform, 0u);
-    alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{device};
 
-    const Idx m = size; // rows of A and C
-    const Idx n = size; // columns of B and C
-    const Idx k = size; // columns of A and rows of B
+#include "cpu/unit_test.tpp"
 
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
+#endif // ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
 
-    const Idx lda = size; // leading dimension of A
-    const Idx ldb = size; // leading dimension of B
-    const Idx ldc = size; // leading dimension of C
-
-    sofieBLAS<alpaka::TagCpuSerial> blas(queue);
-    blas.gemm('n', 'n', m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
-
-    alpaka::wait(queue);
-    std::cout << "CPU Matrix C = A × B:\n";
-    print(C, size);
-    std::cout << '\n';
-  }
+#if defined(ALPAKA_ACC_GPU_CUDA_ENABLED) || defined(ALPAKA_ACC_GPU_HIP_ENABLED)
+static int ldaFor(char trans, int m, int k) {
+  return (trans == 'N' || trans == 'n') ? m : k;
+}
+static int ldbFor(char trans, int k, int n) {
+  return (trans == 'N' || trans == 'n') ? k : n;
+}
+#include "gpu/unit_test.tpp"
 #endif
 
-  return 0;
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+int main() {
+#ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
+  runCpuTests();
+#endif
+#ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
+  runGpuTests<alpaka::TagGpuCudaRt>();
+  runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>();
+#endif
+#ifdef ALPAKA_ACC_GPU_HIP_ENABLED
+  runGpuTests<alpaka::TagGpuHipRt>();
+  runGpuDynamicShapeTests<alpaka::TagGpuHipRt>();
+#endif
+
+  std::cout << "\n";
+  if (gFailures == 0)
+    std::cout << "All tests passed.\n";
+  else
+    std::cout << gFailures << " test(s) FAILED.\n";
+
+  return gFailures > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
