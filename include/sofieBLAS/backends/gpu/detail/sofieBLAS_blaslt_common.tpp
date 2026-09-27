@@ -290,6 +290,25 @@ public:
         batchCount));
   }
 
+    template <typename TA, typename TB, typename TC>
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k,
+                         TA const &A, TB const &B, TC &C) {
+    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
+                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(A)),
+                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(B)),
+                    reinterpret_cast<int32_t *>(alpaka::getPtrNative(C)),
+                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k,
+                         const int8_t *A, const int8_t *B, int32_t *C) {
+    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
+                    A, B, C,
+                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+  }
+
 private:
   typename Api::Queue m_queue;
 
@@ -518,27 +537,7 @@ private:
                                    workspaceSize, stream));
   }
 
-public:
-  template <typename TA, typename TB, typename TC>
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         TA const &A, TB const &B, TC &C) {
-    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
-                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(A)),
-                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(B)),
-                    reinterpret_cast<int32_t *>(alpaka::getPtrNative(C)),
-                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
-  }
-
-  inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         const int8_t *A, const int8_t *B, int32_t *C) {
-    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
-                    A, B, C,
-                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
-  }
-
-private:
+    void executeMatmul(typename Api::Operation transA,
                      typename Api::Operation transB,
                      typename Api::Epilogue epilogue, float alpha,
                      const float *A, const float *B, float beta,

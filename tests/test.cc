@@ -2,6 +2,7 @@
 #include <alpaka/alpaka.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -102,6 +103,48 @@ static void fillSeq(float *M, int n, float start = 1.f, float step = 1.f) {
 static void fillVal(float *M, int n, float v) {
   for (int i = 0; i < n; ++i)
     M[i] = v;
+}
+
+// C = op(A) * op(B), int8 inputs accumulated into int32 output (column-major)
+static void refMatmulI8(int32_t *C, const int8_t *A, const int8_t *B, int m,
+                        int n, int k, bool transA, bool transB) {
+  int lda = transA ? k : m;
+  int ldb = transB ? n : k;
+  auto at = [&](const int8_t *M, int row, int col, int ld) {
+    return static_cast<int32_t>(M[col * ld + row]);
+  };
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < m; ++i) {
+      int32_t sum = 0;
+      for (int p = 0; p < k; ++p) {
+        int32_t a = transA ? at(A, p, i, lda) : at(A, i, p, lda);
+        int32_t b = transB ? at(B, j, p, ldb) : at(B, p, j, ldb);
+        sum += a * b;
+      }
+      C[j * m + i] = sum;
+    }
+  }
+}
+
+static void checkEqual(const int32_t *got, const int32_t *expected, int n,
+                       const std::string &name) {
+  bool pass = true;
+  for (int i = 0; i < n; ++i) {
+    if (got[i] != expected[i]) {
+      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
+                << " expected=" << expected[i] << "\n";
+      pass = false;
+    }
+  }
+  if (pass)
+    std::cout << "  PASS  " << name << "\n";
+  else
+    ++gFailures;
+}
+
+static void fillSeqI8(int8_t *M, int n, int8_t start = 1, int8_t step = 1) {
+  for (int i = 0; i < n; ++i)
+    M[i] = static_cast<int8_t>(start + i * step);
 }
 
 // ---------------------------------------------------------------------------

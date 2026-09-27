@@ -200,6 +200,68 @@ static void runCpuTests() {
     checkClose(C, ref.data(), M * N, "cpu::matmul zero-A");
   }
 
+  // --- int8 matmul ---
+  {
+    auto hAi = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(M * K));
+    auto hBi = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(K * N));
+    auto hCi = alpaka::allocBuf<int32_t, Idx>(dev, static_cast<Idx>(M * N));
+    int8_t *Ai = alpaka::getPtrNative(hAi);
+    int8_t *Bi = alpaka::getPtrNative(hBi);
+    int32_t *Ci = alpaka::getPtrNative(hCi);
+    fillSeqI8(Ai, M * K, 1, 1);
+    fillSeqI8(Bi, K * N, -2, 1);
+
+    std::vector<int32_t> refI8(M * N);
+
+    // --- int8 matmul NN ---
+    refMatmulI8(refI8.data(), Ai, Bi, M, N, K, false, false);
+    blas.int8Matmul('N', 'N', M, N, K, hAi, hBi, hCi);
+    checkEqual(Ci, refI8.data(), M * N, "cpu::int8Matmul NN");
+
+    // --- int8 matmul TN ---
+    {
+      auto hAit = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(K * M));
+      int8_t *Ait = alpaka::getPtrNative(hAit);
+      fillSeqI8(Ait, K * M, 1, 1);
+      refMatmulI8(refI8.data(), Ait, Bi, M, N, K, true, false);
+      blas.int8Matmul('T', 'N', M, N, K, hAit, hBi, hCi);
+      checkEqual(Ci, refI8.data(), M * N, "cpu::int8Matmul TN");
+    }
+
+    // --- int8 matmul NT ---
+    {
+      auto hBit = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(N * K));
+      int8_t *Bit = alpaka::getPtrNative(hBit);
+      fillSeqI8(Bit, N * K, -2, 1);
+      refMatmulI8(refI8.data(), Ai, Bit, M, N, K, false, true);
+      blas.int8Matmul('N', 'T', M, N, K, hAi, hBit, hCi);
+      checkEqual(Ci, refI8.data(), M * N, "cpu::int8Matmul NT");
+    }
+
+    // --- int8 matmul TT ---
+    {
+      auto hAit = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(K * M));
+      auto hBit = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(N * K));
+      int8_t *Ait = alpaka::getPtrNative(hAit);
+      int8_t *Bit = alpaka::getPtrNative(hBit);
+      fillSeqI8(Ait, K * M, 1, 1);
+      fillSeqI8(Bit, N * K, -2, 1);
+      refMatmulI8(refI8.data(), Ait, Bit, M, N, K, true, true);
+      blas.int8Matmul('T', 'T', M, N, K, hAit, hBit, hCi);
+      checkEqual(Ci, refI8.data(), M * N, "cpu::int8Matmul TT");
+    }
+
+    // --- int8 matmul: zero A ---
+    {
+      auto hZero = alpaka::allocBuf<int8_t, Idx>(dev, static_cast<Idx>(M * K));
+      int8_t *Zero = alpaka::getPtrNative(hZero);
+      std::fill(Zero, Zero + M * K, int8_t{0});
+      std::fill(refI8.begin(), refI8.end(), 0);
+      blas.int8Matmul('N', 'N', M, N, K, hZero, hBi, hCi);
+      checkEqual(Ci, refI8.data(), M * N, "cpu::int8Matmul zero-A");
+    }
+  }
+
   // --- edge: identity-like (square, known result) ---
   {
     constexpr int S = 3;

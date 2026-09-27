@@ -12,7 +12,9 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 class BlasCpu {
 public:
@@ -189,6 +191,20 @@ public:
       c[i] *= 0.5f * (1.0f + std::erff(c[i] * kInvSqrt2));
   }
 
+  template <typename TA, typename TB, typename TC>
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, TA const &A,
+                         TB const &B, TC &C) {
+    dispatchInt8Matmul(transa, transb, m, n, k, alpaka::getPtrNative(A),
+                      alpaka::getPtrNative(B), alpaka::getPtrNative(C));
+  }
+
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, const int8_t *A,
+                         const int8_t *B, int32_t *C) {
+    dispatchInt8Matmul(transa, transb, m, n, k, A, B, C);
+  }
+
   // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr
   // via getPtrNative()
   template <typename T>
@@ -237,6 +253,74 @@ public:
     constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (unsigned int i = 0; i < m * n; ++i)
       C[i] *= 0.5f * (1.0f + std::erff(C[i] * kInvSqrt2));
+  }
+
+private:
+  static inline void executeInt8Matmul(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, const int8_t *A,
+                                       const int8_t *B, int32_t *C) {
+    bool ta = (transa == 'T' || transa == 't');
+    bool tb = (transb == 'T' || transb == 't');
+    int lda = ta ? static_cast<int>(k) : static_cast<int>(m);
+    int ldb = tb ? static_cast<int>(n) : static_cast<int>(k);
+    auto at = [](const int8_t *M, int row, int col, int ld) -> int32_t {
+      return M[col * ld + row];
+    };
+    for (unsigned int j = 0; j < n; ++j) {
+      for (unsigned int i = 0; i < m; ++i) {
+        int32_t sum = 0;
+        for (unsigned int p = 0; p < k; ++p) {
+          int32_t a = ta ? at(A, static_cast<int>(p), static_cast<int>(i), lda)
+                         : at(A, static_cast<int>(i), static_cast<int>(p), lda);
+          int32_t b = tb ? at(B, static_cast<int>(j), static_cast<int>(p), ldb)
+                         : at(B, static_cast<int>(p), static_cast<int>(j), ldb);
+          sum += a * b;
+        }
+        C[j * m + i] = sum;
+      }
+    }
+  }
+
+#if defined(SOFIEBLAS_USE_MKL)
+  static inline void executeInt8MatmulMKL(char transa, char transb,
+                                          unsigned int m, unsigned int n,
+                                          unsigned int k, const int8_t *A,
+                                          const int8_t *B, int32_t *C) {
+    bool ta = (transa == 'T' || transa == 't');
+    bool tb = (transb == 'T' || transb == 't');
+    int lda = ta ? static_cast<int>(k) : static_cast<int>(m);
+    int ldb = tb ? static_cast<int>(n) : static_cast<int>(k);
+    int ldc = static_cast<int>(m);
+
+    // B is stored as k*n contiguous int8 elements regardless of transb (the
+    // transpose flag only changes how those elements are interpreted).
+    std::vector<uint8_t> ub(static_cast<std::size_t>(k) *
+                            static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < ub.size(); ++i)
+      ub[i] = static_cast<uint8_t>(B[i]) ^ 0x80u;
+
+    const float alpha = 1.0f, beta = 0.0f;
+    const MKL_INT8 oa = 0, ob = -128;
+    const MKL_INT32 oc = 0;
+    cblas_gemm_s8u8s32(
+        CblasColMajor, ta ? CblasTrans : CblasNoTrans,
+        tb ? CblasTrans : CblasNoTrans, CblasFixOffset,
+        static_cast<MKL_INT>(m), static_cast<MKL_INT>(n),
+        static_cast<MKL_INT>(k), alpha, A, lda, oa, ub.data(), ldb, ob, beta,
+        C, ldc, &oc);
+  }
+#endif
+
+  static inline void dispatchInt8Matmul(char transa, char transb,
+                                        unsigned int m, unsigned int n,
+                                        unsigned int k, const int8_t *A,
+                                        const int8_t *B, int32_t *C) {
+#if defined(SOFIEBLAS_USE_MKL)
+    executeInt8MatmulMKL(transa, transb, m, n, k, A, B, C);
+#else
+    executeInt8Matmul(transa, transb, m, n, k, A, B, C);
+#endif
   }
 };
 

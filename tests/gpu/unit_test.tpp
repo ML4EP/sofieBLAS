@@ -216,6 +216,76 @@ template <typename TTag> static void runGpuTests() {
     blas.matmul('N', 'N', M, N, K, 1.f, dZero, dB, 0.f, dC);
     verify("matmul zero-A");
   }
+
+  // ---- int8 matmul ----
+  {
+    constexpr int MI = 8, NI = 4, KI = 8;
+
+    auto hAi =
+        alpaka::allocBuf<int8_t, Idx>(hostDev, static_cast<Idx>(MI * KI));
+    auto hBi =
+        alpaka::allocBuf<int8_t, Idx>(hostDev, static_cast<Idx>(KI * NI));
+    auto hCi =
+        alpaka::allocBuf<int32_t, Idx>(hostDev, static_cast<Idx>(MI * NI));
+    int8_t *Ai = alpaka::getPtrNative(hAi);
+    int8_t *Bi = alpaka::getPtrNative(hBi);
+    int32_t *Ci = alpaka::getPtrNative(hCi);
+    fillSeqI8(Ai, MI * KI, 1, 1);
+    fillSeqI8(Bi, KI * NI, -2, 1);
+
+    auto dAi =
+        alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(MI * KI));
+    auto dBi =
+        alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(KI * NI));
+    auto dCi =
+        alpaka::allocAsyncBuf<int32_t, Idx>(queue, static_cast<Idx>(MI * NI));
+    alpaka::memcpy(queue, dAi, hAi);
+    alpaka::memcpy(queue, dBi, hBi);
+    alpaka::wait(queue);
+
+    std::vector<int32_t> refI8(MI * NI);
+
+    auto verifyI8 = [&](const std::string &name) {
+      alpaka::memcpy(queue, hCi, dCi);
+      alpaka::wait(queue);
+      checkEqual(Ci, refI8.data(), MI * NI, name);
+    };
+
+    // ---- int8 matmul NN ----
+    refMatmulI8(refI8.data(), Ai, Bi, MI, NI, KI, false, false);
+    blas.int8Matmul('N', 'N', MI, NI, KI, dAi, dBi, dCi);
+    verifyI8("int8Matmul NN");
+
+    // ---- int8 matmul TN ----
+    {
+      auto hAit =
+          alpaka::allocBuf<int8_t, Idx>(hostDev, static_cast<Idx>(KI * MI));
+      int8_t *Ait = alpaka::getPtrNative(hAit);
+      fillSeqI8(Ait, KI * MI, 1, 1);
+      auto dAit =
+          alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(KI * MI));
+      alpaka::memcpy(queue, dAit, hAit);
+      alpaka::wait(queue);
+      refMatmulI8(refI8.data(), Ait, Bi, MI, NI, KI, true, false);
+      blas.int8Matmul('T', 'N', MI, NI, KI, dAit, dBi, dCi);
+      verifyI8("int8Matmul TN");
+    }
+
+    // ---- int8 matmul: zero A ----
+    {
+      auto hZero =
+          alpaka::allocBuf<int8_t, Idx>(hostDev, static_cast<Idx>(MI * KI));
+      int8_t *Zero = alpaka::getPtrNative(hZero);
+      std::fill(Zero, Zero + MI * KI, int8_t{0});
+      auto dZero = alpaka::allocAsyncBuf<int8_t, Idx>(
+          queue, static_cast<Idx>(MI * KI));
+      alpaka::memcpy(queue, dZero, hZero);
+      alpaka::wait(queue);
+      std::fill(refI8.begin(), refI8.end(), 0);
+      blas.int8Matmul('N', 'N', MI, NI, KI, dZero, dBi, dCi);
+      verifyI8("int8Matmul zero-A");
+    }
+  }
 }
 
 template <typename TTag>
