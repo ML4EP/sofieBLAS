@@ -16,10 +16,19 @@ struct PairHash {
   }
 };
 
-struct PairEq {
-  bool operator()(const std::pair<std::size_t, std::size_t> &a,
-                  const std::pair<std::size_t, std::size_t> &b) const noexcept {
-    return a.first == b.first && a.second == b.second;
+struct LayoutKey {
+  int type;
+  std::size_t rows, cols;
+  bool operator==(const LayoutKey &o) const noexcept {
+    return type == o.type && rows == o.rows && cols == o.cols;
+  }
+};
+
+struct LayoutKeyHash {
+  std::size_t operator()(const LayoutKey &k) const noexcept {
+    std::size_t h = PairHash{}({k.rows, k.cols});
+    return h ^ (std::hash<int>{}(k.type) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+                (h >> 2));
   }
 };
 
@@ -27,8 +36,11 @@ struct DescKey {
   int transA; // backend transpose enum encoded as int
   int transB;
   int epilogue; // backend epilogue enum encoded as int
+  int computeType;
+  int scaleType;
   bool operator==(const DescKey &o) const noexcept {
-    return transA == o.transA && transB == o.transB && epilogue == o.epilogue;
+    return transA == o.transA && transB == o.transB && epilogue == o.epilogue &&
+           computeType == o.computeType && scaleType == o.scaleType;
   }
 };
 
@@ -37,6 +49,8 @@ struct DescKeyHash {
     std::size_t h = static_cast<std::size_t>(k.transA) * 97u +
                     static_cast<std::size_t>(k.transB) * 31u +
                     static_cast<std::size_t>(k.epilogue);
+    h = h * 31u + static_cast<std::size_t>(k.computeType);
+    h = h * 31u + static_cast<std::size_t>(k.scaleType);
     return h ^ (h >> 16);
   }
 };
@@ -74,8 +88,7 @@ template <class Api> class BlasLt {
   size_t workspaceSize = 1u << 25; // 32 MB
   typename Api::Stream stream = nullptr;
 
-  std::unordered_map<std::pair<std::size_t, std::size_t>, typename Api::Layout,
-                     PairHash, PairEq>
+  std::unordered_map<LayoutKey, typename Api::Layout, LayoutKeyHash>
       layoutStore;
 
   std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash> descStore;
@@ -122,13 +135,7 @@ public:
     for (auto &[key, layout] : layoutStore)
       if (layout)
         Api::layoutDestroy(layout);
-    for (auto &[key, layout] : i8LayoutStore)
-      if (layout)
-        Api::layoutDestroy(layout);
     for (auto &[key, desc] : descStore)
-      if (desc)
-        Api::descDestroy(desc);
-    for (auto &[key, desc] : i8DescStore)
       if (desc)
         Api::descDestroy(desc);
     if (preference)
@@ -158,6 +165,22 @@ public:
     }
   }
 
+  inline typename Api::Epilogue toApiEpilogue(Epilogue epilogue) {
+    switch (epilogue) {
+    case Epilogue::Bias:
+      return Api::EpilogueBias;
+    case Epilogue::ReluBias:
+      return Api::EpilogueReluBias;
+    case Epilogue::GeluBias:
+      return Api::EpilogueGeluBias;
+    case Epilogue::Relu:
+      return Api::EpilogueRelu;
+    case Epilogue::Default:
+      break;
+    }
+    return Api::EpilogueDefault;
+  }
+
   // Registers a call site's construction-time shape: creates the three matrix
   // layouts and resolves the multiply algorithm for them up front, so the
   // first call at this shape finds everything cached.
@@ -171,22 +194,8 @@ public:
     getOrCreateLayout(shapeB, ldb);
     getOrCreateLayout(shapeC, ldc);
 
-    typename Api::Epilogue apiEpilogue = Api::EpilogueDefault;
-    switch (epilogue) {
-    case Epilogue::Bias:
-      apiEpilogue = Api::EpilogueBias;
-      break;
-    case Epilogue::ReluBias:
-      apiEpilogue = Api::EpilogueReluBias;
-      break;
-    case Epilogue::GeluBias:
-      apiEpilogue = Api::EpilogueGeluBias;
-      break;
-    case Epilogue::Default:
-      break;
-    }
     getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                     apiEpilogue, shapeA, shapeB, shapeC);
+                     toApiEpilogue(epilogue), shapeA, shapeB, shapeC);
   }
 
   // Each multiply variant comes as one generic overload, where A, B, bias and
@@ -198,8 +207,8 @@ public:
                    unsigned int k, float alpha, TA const &A, TB const &B,
                    float beta, TBias &bias, TC &C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueBias, alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  Api::EpilogueBias, &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
                   alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
@@ -210,7 +219,7 @@ public:
                    unsigned int k, float alpha, T const *A, T const *B,
                    float beta, T *bias, T *C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueBias, alpha, A, B, beta, bias, C,
+                  Api::EpilogueBias, &alpha, A, B, &beta, bias, C,
                   static_cast<const void *>(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n});
   }
@@ -220,8 +229,8 @@ public:
                        unsigned int k, float alpha, TA const &A, TB const &B,
                        float beta, TBias &bias, TC &C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueReluBias, alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  Api::EpilogueReluBias, &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
                   alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
@@ -232,7 +241,7 @@ public:
                        unsigned int k, float alpha, T const *A, T const *B,
                        float beta, T *bias, T *C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueReluBias, alpha, A, B, beta, bias, C,
+                  Api::EpilogueReluBias, &alpha, A, B, &beta, bias, C,
                   static_cast<const void *>(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n});
   }
@@ -242,8 +251,8 @@ public:
                        unsigned int k, float alpha, TA const &A, TB const &B,
                        float beta, TBias &bias, TC &C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueGeluBias, alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), beta, alpaka::getPtrNative(bias),
+                  Api::EpilogueGeluBias, &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, alpaka::getPtrNative(bias),
                   alpaka::getPtrNative(C),
                   static_cast<const void *>(alpaka::getPtrNative(bias)),
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
@@ -254,7 +263,7 @@ public:
                        unsigned int k, float alpha, T const *A, T const *B,
                        float beta, T *bias, T *C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueGeluBias, alpha, A, B, beta, bias, C,
+                  Api::EpilogueGeluBias, &alpha, A, B, &beta, bias, C,
                   static_cast<const void *>(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n});
   }
@@ -265,8 +274,8 @@ public:
                      float beta, TC &C) {
     auto *c = alpaka::getPtrNative(C);
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), beta, c, c, nullptr,
+                  Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
@@ -275,7 +284,7 @@ public:
                      unsigned int k, float alpha, T const *A, T const *B,
                      float beta, T *C) {
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, alpha, A, B, beta, C, C, nullptr,
+                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
@@ -290,23 +299,68 @@ public:
         batchCount));
   }
 
-    template <typename TA, typename TB, typename TC>
+  template <typename TA, typename TB, typename TC>
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k,
                          TA const &A, TB const &B, TC &C) {
-    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
-                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(A)),
-                    reinterpret_cast<const int8_t *>(alpaka::getPtrNative(B)),
-                    reinterpret_cast<int32_t *>(alpaka::getPtrNative(C)),
-                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    const int32_t alpha = 1, beta = 0;
+    auto *c = alpaka::getPtrNative(C);
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  Api::ComputeI32, Api::RealI32, Api::RealI8, Api::RealI32);
   }
 
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k,
                          const int8_t *A, const int8_t *B, int32_t *C) {
-    executeI8Matmul(charToTranspose(transa), charToTranspose(transb),
-                    A, B, C,
-                    layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
+    const int32_t alpha = 1, beta = 0;
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  Api::ComputeI32, Api::RealI32, Api::RealI8, Api::RealI32);
+  }
+
+  template <typename TA, typename TB, typename TBias, typename TC>
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, float alpha,
+                         TA const &A, TB const &B, TBias &bias, TC &C,
+                         Epilogue epilogue) {
+    const float beta = 0.f;
+    auto *c = alpaka::getPtrNative(C);
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, c, c,
+                  alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
+                  Api::RealF32, Api::RealI8, Api::RealI8);
+  }
+
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, float alpha,
+                         const int8_t *A, const int8_t *B, const float *bias,
+                         int8_t *C, Epilogue epilogue) {
+    const float beta = 0.f;
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8);
+  }
+
+  // Checks whether the library has a kernel for the int8-output int8Matmul
+  // above (int8 A, B and C, float alpha and bias) with these transposes,
+  // sizes and epilogue. Returns false instead of ending the process when it
+  // has none, so the caller can take another path, such as the int32-output
+  // int8Matmul.
+  inline bool int8MatmulSupported(char transa, char transb, unsigned int m,
+                                  unsigned int n, unsigned int k,
+                                  Epilogue epilogue) {
+    return getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
+                            toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
+                            layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
+                            Api::RealF32, Api::RealI8, Api::RealI8,
+                            /*exitOnNoAlgorithm=*/false) != nullptr;
   }
 
 private:
@@ -328,27 +382,31 @@ private:
   // it on first use. Every caller passes ld = rows (dense column-major).
   typename Api::Layout
   getOrCreateLayout(const std::pair<std::size_t, std::size_t> &shape,
-                    std::size_t ld) {
-    auto it = layoutStore.find(shape);
+                    std::size_t ld, decltype(Api::RealF32) type = Api::RealF32) {
+    const LayoutKey key{static_cast<int>(type), shape.first, shape.second};
+    auto it = layoutStore.find(key);
     if (it != layoutStore.end())
       return it->second;
     typename Api::Layout layout = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, Api::RealF32, shape.first,
+    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, type, shape.first,
                                          shape.second, ld));
-    layoutStore.emplace(shape, layout);
+    layoutStore.emplace(key, layout);
     return layout;
   }
 
-  typename Api::MatmulDesc &getOrCreateDesc(typename Api::Operation transA,
-                                            typename Api::Operation transB,
-                                            typename Api::Epilogue epilogue) {
-    DescKey key{(int)transA, (int)transB, (int)epilogue};
+  typename Api::MatmulDesc &
+  getOrCreateDesc(typename Api::Operation transA, typename Api::Operation transB,
+                  typename Api::Epilogue epilogue,
+                  decltype(Api::ComputeF32) computeType = Api::ComputeF32,
+                  decltype(Api::RealF32) scaleType = Api::RealF32) {
+    DescKey key{(int)transA, (int)transB, (int)epilogue, (int)computeType,
+                (int)scaleType};
     auto it = descStore.find(key);
     if (it != descStore.end())
       return it->second;
 
     typename Api::MatmulDesc desc = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, Api::ComputeF32, Api::RealF32));
+    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, computeType, scaleType));
     SOFIEBLAS_CHECK_LT(
         Api::descSetAttribute(desc, Api::DescTransA, &transA, sizeof(transA)));
     SOFIEBLAS_CHECK_LT(
@@ -356,24 +414,33 @@ private:
     SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescEpilogue, &epilogue,
                                              sizeof(epilogue)));
     // For bias epilogues: set a non-null dummy pointer so the descriptor is
-    // valid for the heuristic query.
-    if (epilogue != Api::EpilogueDefault) {
+    // valid for the heuristic query, and give the bias the scale type (FP8
+    // will need BF16 here).
+    if (epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu) {
       const void *dummy = d_workspace;
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &dummy, sizeof(dummy)));
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasDataType,
+                                               &scaleType, sizeof(scaleType)));
     }
     descStore.emplace(key, desc);
     return descStore.at(key);
   }
 
-  typename Api::HeuristicResult &
+  typename Api::HeuristicResult *
   getOrComputeAlgo(typename Api::Operation transA,
                    typename Api::Operation transB,
                    typename Api::Epilogue epilogue,
                    const std::pair<std::size_t, std::size_t> &shapeA,
                    const std::pair<std::size_t, std::size_t> &shapeB,
-                   const std::pair<std::size_t, std::size_t> &shapeC) {
-    AlgoKey key{{(int)transA, (int)transB, (int)epilogue},
+                   const std::pair<std::size_t, std::size_t> &shapeC,
+                   decltype(Api::ComputeF32) computeType = Api::ComputeF32,
+                   decltype(Api::RealF32) scaleType = Api::RealF32,
+                   decltype(Api::RealF32) typeAB = Api::RealF32,
+                   decltype(Api::RealF32) typeC = Api::RealF32,
+                   bool exitOnNoAlgorithm = true) {
+    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)computeType,
+                 (int)scaleType},
                 shapeA.first,
                 shapeA.second,
                 shapeB.first,
@@ -382,18 +449,24 @@ private:
     if (it != algoCache.end()) {
       if (algoCacheLimit)
         lruOrder.splice(lruOrder.begin(), lruOrder, it->second.lru);
-      return it->second.h;
+      return &it->second.h;
     }
 
-    auto &desc = getOrCreateDesc(transA, transB, epilogue);
-    auto lA = getOrCreateLayout(shapeA, shapeA.first);
-    auto lB = getOrCreateLayout(shapeB, shapeB.first);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first);
+    auto &desc =
+        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
+    auto lA = getOrCreateLayout(shapeA, shapeA.first, typeAB);
+    auto lB = getOrCreateLayout(shapeB, shapeB.first, typeAB);
+    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
     typename Api::HeuristicResult h{};
     int returnedResults = 0;
-    SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
-                                         preference, 1, &h, &returnedResults));
+    const auto status = Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
+                                          preference, 1, &h, &returnedResults);
+    if (!exitOnNoAlgorithm && status == Api::StatusNotSupported)
+      return nullptr;
+    SOFIEBLAS_CHECK_LT(status);
     if (returnedResults == 0) {
+      if (!exitOnNoAlgorithm)
+        return nullptr;
       std::cerr << "[sofieBLAS] No suitable " << Api::name
                 << " algorithm found for "
                 << "transA=" << transA << " transB=" << transB
@@ -411,156 +484,38 @@ private:
         lruOrder.pop_back();
       }
     }
-    return ins->second.h;
+    return &ins->second.h;
   }
 
-  std::unordered_map<std::pair<std::size_t, std::size_t>, typename Api::Layout,
-                     PairHash, PairEq>
-      i8LayoutStore;
-
-  std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash> i8DescStore;
-
-  struct I8CacheEntry {
-    typename Api::HeuristicResult h{};
-    std::list<AlgoKey>::iterator lru{};
-  };
-  std::unordered_map<AlgoKey, I8CacheEntry, AlgoKeyHash> i8AlgoCache;
-  std::list<AlgoKey> i8LruOrder;
-
-  typename Api::Layout
-  getOrCreateI8Layout(const std::pair<std::size_t, std::size_t> &shape,
-                      std::size_t ld, bool isOutput) {
-    auto it = i8LayoutStore.find(shape);
-    if (it != i8LayoutStore.end())
-      return it->second;
-    typename Api::Layout layout = nullptr;
-    auto dtype = isOutput ? Api::RealI32 : Api::RealI8;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, dtype,
-                                         shape.first, shape.second, ld));
-    i8LayoutStore.emplace(shape, layout);
-    return layout;
-  }
-
-  typename Api::MatmulDesc &
-  getOrCreateI8Desc(typename Api::Operation transA,
-                    typename Api::Operation transB) {
-    DescKey key{(int)transA, (int)transB, /*epilogue=*/0};
-    auto it = i8DescStore.find(key);
-    if (it != i8DescStore.end())
-      return it->second;
-
-    typename Api::MatmulDesc desc = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, Api::ComputeI32, Api::RealI32));
-    SOFIEBLAS_CHECK_LT(
-        Api::descSetAttribute(desc, Api::DescTransA, &transA, sizeof(transA)));
-    SOFIEBLAS_CHECK_LT(
-        Api::descSetAttribute(desc, Api::DescTransB, &transB, sizeof(transB)));
-    i8DescStore.emplace(key, desc);
-    return i8DescStore.at(key);
-  }
-
-  typename Api::HeuristicResult &
-  getOrComputeI8Algo(typename Api::Operation transA,
+  void executeMatmul(typename Api::Operation transA,
                      typename Api::Operation transB,
+                     typename Api::Epilogue epilogue, const void *alpha,
+                     const void *A, const void *B, const void *beta,
+                     const void *D_in, void *C_out, const void *bias_ptr,
                      const std::pair<std::size_t, std::size_t> &shapeA,
                      const std::pair<std::size_t, std::size_t> &shapeB,
-                     const std::pair<std::size_t, std::size_t> &shapeC) {
-    AlgoKey key{{(int)transA, (int)transB, /*epilogue=*/0},
-                shapeA.first, shapeA.second,
-                shapeB.first, shapeB.second};
-    auto it = i8AlgoCache.find(key);
-    if (it != i8AlgoCache.end()) {
-      if (algoCacheLimit)
-        i8LruOrder.splice(i8LruOrder.begin(), i8LruOrder, it->second.lru);
-      return it->second.h;
-    }
-
-    auto &desc = getOrCreateI8Desc(transA, transB);
-    auto lA = getOrCreateI8Layout(shapeA, shapeA.first, /*isOutput=*/false);
-    auto lB = getOrCreateI8Layout(shapeB, shapeB.first, /*isOutput=*/false);
-
-    auto outKey = std::make_pair(shapeC.first + (std::size_t(1) << 48),
-                                shapeC.second);
-    auto lC_it = i8LayoutStore.find(outKey);
-    typename Api::Layout lC = nullptr;
-    if (lC_it != i8LayoutStore.end()) {
-      lC = lC_it->second;
-    } else {
-      SOFIEBLAS_CHECK_LT(Api::layoutCreate(&lC, Api::RealI32,
-                                           shapeC.first, shapeC.second,
-                                           shapeC.first));
-      i8LayoutStore.emplace(outKey, lC);
-    }
-
-    typename Api::HeuristicResult h{};
-    int returnedResults = 0;
-    SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
-                                         preference, 1, &h, &returnedResults));
-    if (returnedResults == 0) {
-      std::cerr << "[sofieBLAS] No suitable " << Api::name
-                << " INT8 algorithm found for "
-                << "A=[" << shapeA.first << "x" << shapeA.second << "]"
-                << " B=[" << shapeB.first << "x" << shapeB.second << "]\n";
-      exit(EXIT_FAILURE);
-    }
-    auto ins = i8AlgoCache.emplace(key, I8CacheEntry{h, {}}).first;
-    if (algoCacheLimit) {
-      i8LruOrder.push_front(key);
-      ins->second.lru = i8LruOrder.begin();
-      while (i8AlgoCache.size() > algoCacheLimit) {
-        i8AlgoCache.erase(i8LruOrder.back());
-        i8LruOrder.pop_back();
-      }
-    }
-    return ins->second.h;
-  }
-
-  void executeI8Matmul(typename Api::Operation transA,
-                       typename Api::Operation transB,
-                       const int8_t *A, const int8_t *B,
-                       int32_t *C,
-                       const std::pair<std::size_t, std::size_t> &shapeA,
-                       const std::pair<std::size_t, std::size_t> &shapeB,
-                       const std::pair<std::size_t, std::size_t> &shapeC) {
-    auto &h = getOrComputeI8Algo(transA, transB, shapeA, shapeB, shapeC);
-    auto &desc = getOrCreateI8Desc(transA, transB);
-
-    auto lA = getOrCreateI8Layout(shapeA, shapeA.first, false);
-    auto lB = getOrCreateI8Layout(shapeB, shapeB.first, false);
-    auto outKey = std::make_pair(shapeC.first + (std::size_t(1) << 48),
-                                shapeC.second);
-    auto lC = i8LayoutStore.at(outKey);
-
-    int32_t alpha = 1, beta = 0;
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
-                                   C, lC, C, lC, &h.algo, d_workspace,
-                                   workspaceSize, stream));
-  }
-
-    void executeMatmul(typename Api::Operation transA,
-                     typename Api::Operation transB,
-                     typename Api::Epilogue epilogue, float alpha,
-                     const float *A, const float *B, float beta,
-                     const float *D_in, float *C_out, const void *bias_ptr,
-                     const std::pair<std::size_t, std::size_t> &shapeA,
-                     const std::pair<std::size_t, std::size_t> &shapeB,
-                     const std::pair<std::size_t, std::size_t> &shapeC) {
+                     const std::pair<std::size_t, std::size_t> &shapeC,
+                     decltype(Api::ComputeF32) computeType = Api::ComputeF32,
+                     decltype(Api::RealF32) scaleType = Api::RealF32,
+                     decltype(Api::RealF32) typeAB = Api::RealF32,
+                     decltype(Api::RealF32) typeC = Api::RealF32) {
     // Retrieve (or lazily compute) the cached algorithm for this shape
-    auto &h =
-        getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC);
+    auto *h = getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC,
+                               computeType, scaleType, typeAB, typeC);
 
     // Retrieve the cached descriptor and patch the real bias pointer in-place
-    auto &desc = getOrCreateDesc(transA, transB, epilogue);
+    auto &desc =
+        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
     if (bias_ptr) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
     }
 
-    auto lA = getOrCreateLayout(shapeA, shapeA.first);
-    auto lB = getOrCreateLayout(shapeB, shapeB.first);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first);
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, lA, B, lB, &beta,
-                                   D_in, lC, C_out, lC, &h.algo, d_workspace,
+    auto lA = getOrCreateLayout(shapeA, shapeA.first, typeAB);
+    auto lB = getOrCreateLayout(shapeB, shapeB.first, typeAB);
+    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
+    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, alpha, A, lA, B, lB, beta,
+                                   D_in, lC, C_out, lC, &h->algo, d_workspace,
                                    workspaceSize, stream));
   }
 };
