@@ -74,6 +74,40 @@ static void refGemmGelu(float *C, const float *A, const float *B,
     C[i] *= 0.5f * (1.f + std::erff(C[i] * kInvSqrt2));
 }
 
+// the (rows x cols) column-major matrix `dense` stored with leading dimension ld
+// >= rows; the padding rows are filled with a poison value
+static std::vector<float> padColMajor(const float *dense, int rows, int cols,
+                                      int ld) {
+  std::vector<float> padded(static_cast<size_t>(ld) * cols, 99.f);
+  for (int j = 0; j < cols; ++j)
+    for (int i = 0; i < rows; ++i)
+      padded[j * ld + i] = dense[j * rows + i];
+  return padded;
+}
+
+// batched multiply with an epilogue: C_b = epilogue(A_b * B_b + bias_b), X_b = X + b * strideX
+// (column-major, A_b stored with leading dimension lda), bias_b a vector of m
+static void refBatchedEpilogue(float *C, const float *A, int lda,
+                               long long strideA, const float *B,
+                               long long strideB, const float *bias,
+                               long long strideBias, int m, int n, int k,
+                               int batch, Epilogue epilogue) {
+  constexpr float kInvSqrt2 = 0.7071067811865476f;
+  for (int b = 0; b < batch; ++b)
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < m; ++i) {
+        float sum = 0.f;
+        for (int p = 0; p < k; ++p)
+          sum += A[b * strideA + p * lda + i] * B[b * strideB + j * k + p];
+        sum += bias[b * strideBias + i];
+        if (epilogue == Epilogue::ReluBias)
+          sum = sum > 0.f ? sum : 0.f;
+        else if (epilogue == Epilogue::GeluBias)
+          sum *= 0.5f * (1.f + std::erff(sum * kInvSqrt2));
+        C[b * (long long)m * n + j * m + i] = sum;
+      }
+}
+
 static int gFailures = 0;
 
 static void checkClose(const float *got, const float *expected, int n,

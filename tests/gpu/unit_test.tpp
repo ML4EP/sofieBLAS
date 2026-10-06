@@ -217,6 +217,143 @@ template <typename TTag> static void runGpuTests() {
     verify("matmul zero-A");
   }
 
+  // ---- leading dimensions larger than the number of rows ----
+  {
+    // A and B are stored in buffers with padded columns (lda = M + 3, ldb =
+    // K + 2); the transposed A has K rows and so ld = K + 1
+    fillSeq(bias, M * N, -3.f, 1.f);
+    alpaka::memcpy(queue, dBias, hBias);
+    alpaka::wait(queue);
+
+    struct Case {
+      char transA;
+      unsigned lda, ldb;
+    };
+    for (Case c : {Case{'N', M + 3, K + 2}, Case{'T', K + 1, K + 2},
+                   Case{'N', M, K + 2}}) {
+      const bool tA = c.transA == 'T';
+      const int rowsA = tA ? K : M;
+      const int colsA = tA ? M : K;
+      std::vector<float> At(M * K);
+      fillSeq(At.data(), M * K, 0.3f, 0.2f);
+      auto pA = padColMajor(At.data(), rowsA, colsA, c.lda);
+      auto pB = padColMajor(B, K, N, c.ldb);
+      auto hPA = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(pA.size()));
+      auto hPB = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(pB.size()));
+      std::copy(pA.begin(), pA.end(), alpaka::getPtrNative(hPA));
+      std::copy(pB.begin(), pB.end(), alpaka::getPtrNative(hPB));
+      auto dPA = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(pA.size()));
+      auto dPB = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(pB.size()));
+      alpaka::memcpy(queue, dPA, hPA);
+      alpaka::memcpy(queue, dPB, hPB);
+      alpaka::wait(queue);
+      const std::string tag =
+          std::string(1, c.transA) + "N lda=" + std::to_string(c.lda) +
+          " ldb=" + std::to_string(c.ldb);
+
+      std::fill(ref.begin(), ref.end(), 0.f);
+      refMatmul(ref.data(), At.data(), B, M, N, K, 1.f, 0.f, tA, false);
+      blas.matmul(c.transA, 'N', M, N, K, 1.f, dPA, c.lda, dPB, c.ldb, 0.f, dC);
+      verify("matmul " + tag);
+
+      refGemm(ref.data(), At.data(), B, bias, M, N, K, 1.f, 0.f, tA, false);
+      blas.gemm(c.transA, 'N', M, N, K, 1.f, dPA, c.lda, dPB, c.ldb, 0.f,
+                dBias, dC);
+      verify("gemm " + tag);
+
+      refGemmRelu(ref.data(), At.data(), B, bias, M, N, K, 1.f, 0.f, tA, false);
+      blas.gemmrelu(c.transA, 'N', M, N, K, 1.f, dPA, c.lda, dPB, c.ldb, 0.f,
+                    dBias, dC);
+      verify("gemmrelu " + tag);
+
+      refGemmGelu(ref.data(), At.data(), B, bias, M, N, K, 1.f, 0.f, tA, false);
+      blas.gemmgelu(c.transA, 'N', M, N, K, 1.f, dPA, c.lda, dPB, c.ldb, 0.f,
+                    dBias, dC);
+      verify("gemmgelu " + tag);
+    }
+
+    // a leading dimension smaller than the rows is rejected
+    bool threw = false;
+    try {
+      blas.matmul('N', 'N', M, N, K, 1.f, dA, static_cast<unsigned>(M - 1), dB,
+                  static_cast<unsigned>(K), 0.f, dC);
+    } catch (const std::invalid_argument &) {
+      threw = true;
+    }
+    if (threw)
+      std::cout << "  PASS  matmul lda < rows throws\n";
+    else {
+      std::cerr << "  FAIL [matmul lda < rows throws]\n";
+      ++gFailures;
+    }
+  }
+
+  // ---- batched multiply with a fused epilogue ----
+  {
+    // A (M x K, lda = M + 2) is shared by the batches or B (K x N) is, the
+    // bias is per batch or shared
+    constexpr int BATCH = 3, LDA = M + 2;
+    struct Case {
+      bool sharedA;
+      long long strideBias;
+      Epilogue epilogue;
+      const char *name;
+    };
+    for (Case c : {Case{true, M, Epilogue::Bias, "A shared, bias per batch"},
+                   Case{true, M, Epilogue::ReluBias, "A shared, relu"},
+                   Case{true, 0, Epilogue::GeluBias, "A shared, gelu"},
+                   Case{false, 0, Epilogue::ReluBias, "B shared, relu"},
+                   Case{false, M, Epilogue::Bias, "B shared, bias per batch"}}) {
+      const long long strideA = c.sharedA ? 0 : LDA * K;
+      const long long strideB = c.sharedA ? K * N : 0;
+      std::vector<float> hostA(LDA * K * (c.sharedA ? 1 : BATCH), 99.f);
+      std::vector<float> denseA(M * K * (c.sharedA ? 1 : BATCH));
+      fillSeq(denseA.data(), static_cast<int>(denseA.size()), -1.f, 0.3f);
+      for (size_t b = 0; b < (c.sharedA ? 1u : BATCH); ++b)
+        for (int p = 0; p < K; ++p)
+          for (int i = 0; i < M; ++i)
+            hostA[b * LDA * K + p * LDA + i] = denseA[b * M * K + p * M + i];
+      std::vector<float> hostB(K * N * (c.sharedA ? BATCH : 1));
+      fillSeq(hostB.data(), static_cast<int>(hostB.size()), -2.f, 0.2f);
+      std::vector<float> hostBias(M * BATCH);
+      fillSeq(hostBias.data(), static_cast<int>(hostBias.size()), -1.5f, 0.4f);
+
+      auto upload = [&](const std::vector<float> &v) {
+        auto h = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(v.size()));
+        std::copy(v.begin(), v.end(), alpaka::getPtrNative(h));
+        auto d = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(v.size()));
+        alpaka::memcpy(queue, d, h);
+        alpaka::wait(queue);
+        return d;
+      };
+      auto dBA = upload(hostA);
+      auto dBB = upload(hostB);
+      auto dBBias = upload(hostBias);
+      auto dBC = alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(M * N * BATCH));
+
+      std::vector<float> refB(M * N * BATCH);
+      refBatchedEpilogue(refB.data(), denseA.data(), M, strideA ? M * K : 0,
+                         hostB.data(), strideB, hostBias.data(), c.strideBias,
+                         M, N, K, BATCH, c.epilogue);
+      // the reference reads the dense A, the call the padded one
+      blas.gemmStridedBatched('N', 'N', M, N, K, 1.f,
+                              alpaka::getPtrNative(dBA), LDA, strideA,
+                              alpaka::getPtrNative(dBB), K, strideB, 0.f,
+                              alpaka::getPtrNative(dBC), M, M * N, BATCH,
+                              c.epilogue, alpaka::getPtrNative(dBBias),
+                              c.strideBias);
+      auto hBC = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(M * N * BATCH));
+      alpaka::memcpy(queue, hBC, dBC);
+      alpaka::wait(queue);
+      // the GELU epilogue of cuBLASLt/hipBLASLt is the tanh approximation of
+      // the erf-based reference, which differs by up to ~1e-3
+      const float atol = c.epilogue == Epilogue::GeluBias ? 2e-3f : 1e-4f;
+      checkClose(alpaka::getPtrNative(hBC), refB.data(), M * N * BATCH,
+                 std::string("gemmStridedBatched epilogue: ") + c.name, 1e-4f,
+                 atol);
+    }
+  }
+
   // ---- int8 matmul ----
   {
     constexpr int MI = 8, NI = 4, KI = 8;

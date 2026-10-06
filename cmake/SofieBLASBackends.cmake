@@ -32,7 +32,15 @@ set_property(CACHE SOFIEBLAS_ENABLE_HIP PROPERTY STRINGS ON OFF AUTO)
 
 if(NOT SOFIEBLAS_ENABLE_CUDA STREQUAL "OFF")
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
-    set(CMAKE_CUDA_ARCHITECTURES native)
+    # Default to a portable build: 'all-major' emits SASS for every major arch the
+    # installed nvcc supports plus PTX for the newest, so it never requests an arch
+    # nvcc doesn't know and still JITs on newer GPUs.
+    # Override with -DCMAKE_CUDA_ARCHITECTURES=native (or e.g. 80;90) for faster builds.
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.23)
+      set(CMAKE_CUDA_ARCHITECTURES all-major)
+    else()
+      set(CMAKE_CUDA_ARCHITECTURES 70 80)
+    endif()
   endif()
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)

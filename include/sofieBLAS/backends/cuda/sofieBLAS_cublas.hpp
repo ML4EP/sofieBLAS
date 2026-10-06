@@ -2,10 +2,13 @@
 
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <list>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -62,6 +65,11 @@ struct CublasLtApi {
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr auto DescBiasBatchStride =
+      CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
+  static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutStridedBatchOffset =
+      CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
   static constexpr const char *name = "cuBLASLt";
@@ -76,6 +84,7 @@ struct CublasLtApi {
   static constexpr auto prefSetAttribute = cublasLtMatmulPreferenceSetAttribute;
   static constexpr auto layoutCreate = cublasLtMatrixLayoutCreate;
   static constexpr auto layoutDestroy = cublasLtMatrixLayoutDestroy;
+  static constexpr auto layoutSetAttribute = cublasLtMatrixLayoutSetAttribute;
   static constexpr auto descCreate = cublasLtMatmulDescCreate;
   static constexpr auto descDestroy = cublasLtMatmulDescDestroy;
   static constexpr auto descSetAttribute = cublasLtMatmulDescSetAttribute;
