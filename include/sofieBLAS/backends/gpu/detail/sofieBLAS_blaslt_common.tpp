@@ -400,6 +400,16 @@ public:
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
     const auto epi = toApiEpilogue(epilogue);
+    if constexpr (!Api::SupportsBiasBatchStride) {
+      if (epi != Api::EpilogueDefault && strideBias != 0 && batchCount > 1) {
+        for (int b = 0; b < batchCount; ++b)
+          gemmStridedBatched(transa, transb, m, n, k, alpha, A + b * strideA,
+                             lda, 0, B + b * strideB, ldb, 0, beta,
+                             C + b * strideC, ldc, 0, 1, epilogue,
+                             bias + b * strideBias, 0);
+        return;
+      }
+    }
     const auto opA = charToTranspose(transa);
     const auto opB = charToTranspose(transb);
     const auto shapeA = layoutKeyA(transa, m, k);
@@ -443,10 +453,11 @@ public:
     if (epi != Api::EpilogueDefault) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias, sizeof(bias)));
-      std::int64_t biasStride = strideBias;
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasBatchStride,
-                                               &biasStride,
-                                               sizeof(biasStride)));
+      if constexpr (Api::SupportsBiasBatchStride) {
+        std::int64_t biasStride = strideBias;
+        SOFIEBLAS_CHECK_LT(Api::descSetAttribute(
+            desc, Api::DescBiasBatchStride, &biasStride, sizeof(biasStride)));
+      }
     }
     SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, e.lA, B, e.lB,
                                    &beta, C, e.lC, C, e.lC, &e.h.algo,

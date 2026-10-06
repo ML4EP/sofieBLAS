@@ -65,6 +65,7 @@ struct CublasLtApi {
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr bool SupportsBiasBatchStride = true;
   static constexpr auto DescBiasBatchStride =
       CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
   static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;

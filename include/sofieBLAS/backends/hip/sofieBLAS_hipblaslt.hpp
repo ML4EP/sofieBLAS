@@ -65,8 +65,7 @@ struct HipblasLtApi {
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
-  static constexpr auto DescBiasBatchStride =
-      HIPBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
+  static constexpr bool SupportsBiasBatchStride = false;
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
       HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
