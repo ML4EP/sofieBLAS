@@ -56,6 +56,7 @@ struct HipblasLtApi {
   static constexpr auto EpilogueBias = HIPBLASLT_EPILOGUE_BIAS;
   static constexpr auto EpilogueReluBias = HIPBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = HIPBLASLT_EPILOGUE_GELU_BIAS;
+  static constexpr auto EpilogueRelu = HIPBLASLT_EPILOGUE_RELU;
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
@@ -69,8 +70,11 @@ struct HipblasLtApi {
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
       HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
+  static constexpr auto DescBiasDataType =
+      HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "hipBLASLt";
 
   static constexpr auto ltCreate = hipblasLtCreate;
