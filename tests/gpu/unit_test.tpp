@@ -521,3 +521,210 @@ static void runGpuDynamicShapeTests() {
   }
 }
 
+// fp16 and int8-output GEMMs
+template <typename TTag> static void runGpuLowPrecisionTests() {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+
+  using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
+  using DevAcc = alpaka::Dev<Acc>;
+  using PlatformAcc = alpaka::Platform<Acc>;
+
+  PlatformAcc platform{};
+  auto dev = alpaka::getDevByIdx(platform, 0u);
+  alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
+  sofieBLAS<TTag> blas(queue);
+
+  alpaka::PlatformCpu hostPlatform{};
+  auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
+
+  // copy a host vector into a new device buffer
+  auto upload = [&](const auto &v) {
+    using T = typename std::decay_t<decltype(v)>::value_type;
+    auto h = alpaka::allocBuf<T, Idx>(hostDev, static_cast<Idx>(v.size()));
+    std::copy(v.begin(), v.end(), alpaka::getPtrNative(h));
+    auto d = alpaka::allocAsyncBuf<T, Idx>(queue, static_cast<Idx>(v.size()));
+    alpaka::memcpy(queue, d, h);
+    alpaka::wait(queue);
+    return d;
+  };
+  auto download = [&](auto &d, int n) {
+    using T = std::remove_pointer_t<decltype(alpaka::getPtrNative(d))>;
+    auto h = alpaka::allocBuf<T, Idx>(hostDev, static_cast<Idx>(n));
+    alpaka::memcpy(queue, h, d);
+    alpaka::wait(queue);
+    return std::vector<T>(alpaka::getPtrNative(h), alpaka::getPtrNative(h) + n);
+  };
+
+  // ---- fp16: transposes, alpha and beta, epilogues ----
+  {
+    // multiples of 0.25 below 16: exact in half, and every sum is exact in float
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<float> A(M * K), B(K * N), bias(M), C0(M * N);
+    fillSeq(A.data(), M * K, -2.f, 0.25f);
+    fillSeq(B.data(), K * N, -3.f, 0.25f);
+    fillSeq(bias.data(), M, -4.f, 1.f);
+    fillSeq(C0.data(), M * N, 1.f, 0.25f);
+    auto dA = upload(toHalf(A));
+    auto dB = upload(toHalf(B));
+    auto dBiasF = upload(bias);
+    auto dBiasH = upload(toHalf(bias));
+
+    struct Case {
+      char transA, transB;
+      float alpha, beta;
+      Epilogue epilogue;
+      const char *name;
+    };
+    for (Case c : {Case{'N', 'N', 1.f, 0.f, Epilogue::Default, "NN"},
+                   Case{'T', 'N', 1.f, 0.f, Epilogue::Default, "TN"},
+                   Case{'N', 'T', 1.f, 0.f, Epilogue::Default, "NT"},
+                   Case{'T', 'T', 1.f, 0.f, Epilogue::Default, "TT"},
+                   Case{'N', 'N', 0.5f, 1.f, Epilogue::Default,
+                        "alpha=0.5 beta=1"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::ReluBias, "relu bias"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::Relu, "relu"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::GeluBias, "gelu bias"}}) {
+      std::vector<float> ref = C0; // beta reads C
+      refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, c.alpha,
+                  c.beta, c.transA == 'T', c.transB == 'T', c.epilogue);
+      // the GELU epilogue on the GPU is the tanh approximation of the
+      // erf-based reference; everything else is exact
+      const float tol = c.epilogue == Epilogue::GeluBias ? 2e-3f : 0.f;
+
+      auto dCF = upload(C0);
+      blas.matmulFp16Fp32(c.transA, c.transB, M, N, K, c.alpha, dA, dB, c.beta,
+                          dBiasF, dCF, c.epilogue);
+      checkClose(download(dCF, M * N).data(), ref.data(), M * N,
+                 std::string("matmulFp16Fp32 ") + c.name, tol, tol);
+
+      // a half C: the float result rounded to half
+      auto dCH = upload(toHalf(C0));
+      blas.matmulFp16Fp16(c.transA, c.transB, M, N, K, c.alpha, dA, dB, c.beta,
+                          dBiasH, dCH, c.epilogue);
+      checkClose(fromHalf(download(dCH, M * N).data(), M * N).data(),
+                 fromHalf(toHalf(ref).data(), M * N).data(), M * N,
+                 std::string("matmulFp16Fp16 ") + c.name, tol, tol);
+    }
+  }
+
+  // ---- fp16: the sum is kept in float and rounded to half only at the end ----
+  {
+    // row 0 of A is 2048, 1, 1, ..., 1 and B is all ones, so the float sum is
+    // 2055. Half numbers above 2048 are 2 apart, so a sum kept in half cannot
+    // reach 2055; written as half, 2055 rounds to 2056.
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<float> A(M * K, 0.f), B(K * N, 1.f), zeros(M * N, 0.f);
+    A[0] = 2048.f;
+    for (int p = 1; p < K; ++p)
+      A[p * M] = 1.f;
+    std::vector<float> ref(M * N, 0.f);
+    refMatmul(ref.data(), A.data(), B.data(), M, N, K, 1.f, 0.f, false, false);
+    auto dA = upload(toHalf(A));
+    auto dB = upload(toHalf(B));
+    auto dBiasF = upload(std::vector<float>(M, 0.f));
+    auto dBiasH = upload(toHalf(std::vector<float>(M, 0.f)));
+
+    auto dCF = upload(zeros);
+    blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBiasF, dCF);
+    checkClose(download(dCF, M * N).data(), ref.data(), M * N,
+               "matmulFp16Fp32 sum kept in float (2055)", 0.f, 0.f);
+
+    auto dCH = upload(toHalf(zeros));
+    blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, dA, dB, 0.f, dBiasH, dCH);
+    checkClose(fromHalf(download(dCH, M * N).data(), M * N).data(),
+               fromHalf(toHalf(ref).data(), M * N).data(), M * N,
+               "matmulFp16Fp16 rounded to half at the end (2056)", 0.f, 0.f);
+  }
+
+  // ---- fp16: a shape that is no multiple of 8, through the raw pointers ----
+  {
+    constexpr int M = 33, N = 17, K = 9;
+    std::vector<float> A(M * K), B(K * N), bias(M), zeros(M * N, 0.f);
+    for (int i = 0; i < M * K; ++i)
+      A[i] = 0.5f * static_cast<float>(i % 13 - 6);
+    for (int i = 0; i < K * N; ++i)
+      B[i] = 0.25f * static_cast<float>(i % 7 - 3);
+    fillSeq(bias.data(), M, -2.f, 0.5f);
+    std::vector<float> ref(M * N, 0.f);
+    refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 1.f, 0.f,
+                false, false, Epilogue::Bias);
+    auto dA = upload(toHalf(A));
+    auto dB = upload(toHalf(B));
+    auto dBiasF = upload(bias);
+    auto dBiasH = upload(toHalf(bias));
+    auto dCF = upload(zeros);
+    auto dCH = upload(toHalf(zeros));
+
+    blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, alpaka::getPtrNative(dA),
+                        alpaka::getPtrNative(dB), 0.f,
+                        alpaka::getPtrNative(dBiasF), alpaka::getPtrNative(dCF),
+                        Epilogue::Bias);
+    checkClose(download(dCF, M * N).data(), ref.data(), M * N,
+               "matmulFp16Fp32 33x17x9 raw pointers", 0.f, 0.f);
+
+    blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, alpaka::getPtrNative(dA),
+                        alpaka::getPtrNative(dB), 0.f,
+                        alpaka::getPtrNative(dBiasH), alpaka::getPtrNative(dCH),
+                        Epilogue::Bias);
+    checkClose(fromHalf(download(dCH, M * N).data(), M * N).data(),
+               fromHalf(toHalf(ref).data(), M * N).data(), M * N,
+               "matmulFp16Fp16 33x17x9 raw pointers", 0.f, 0.f);
+  }
+
+  // ---- int8 output: float alpha, float bias, epilogue ----
+  {
+    // alpha = 1/3 never lands a whole-number sum on x.5, which keeps clear of
+    // ties, whose rounding is not tested; alpha = 3 pushes 13 of the 32
+    // results past 127 or below -128
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<int8_t> A(M * K), B(K * N);
+    for (int i = 0; i < M * K; ++i)
+      A[i] = static_cast<int8_t>(i * 5 % 17 - 8);
+    for (int i = 0; i < K * N; ++i)
+      B[i] = static_cast<int8_t>(i * 3 % 13 - 6);
+    std::vector<float> bias(M);
+    fillSeq(bias.data(), M, -6.f, 2.f);
+    auto dA = upload(A);
+    auto dB = upload(B);
+    auto dBias = upload(bias);
+    auto dC = alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(M * N));
+
+    struct Case {
+      char transA, transB;
+      float alpha;
+      Epilogue epilogue;
+      bool rawPointers;
+      const char *name;
+    };
+    for (Case c :
+         {Case{'N', 'N', 1.f / 3.f, Epilogue::Default, false, "NN"},
+          Case{'T', 'N', 1.f / 3.f, Epilogue::Default, true, "TN raw pointers"},
+          Case{'N', 'N', 1.f / 3.f, Epilogue::ReluBias, false, "relu bias"},
+          Case{'N', 'N', 1.f / 3.f, Epilogue::Relu, false, "relu"},
+          Case{'N', 'N', 3.f, Epilogue::Default, false, "saturated"}}) {
+      const std::string name = std::string("int8Matmul int8 out ") + c.name;
+      // the library may have no kernel for a combination; that is reported,
+      // not failed
+      if (!blas.int8MatmulSupported(c.transA, c.transB, M, N, K, c.epilogue)) {
+        std::cout << "  SKIP  " << name << " (no kernel)\n";
+        continue;
+      }
+      std::vector<int8_t> ref(M * N);
+      refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
+                     c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue);
+      if (c.rawPointers)
+        blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha,
+                        alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
+                        alpaka::getPtrNative(dBias), alpaka::getPtrNative(dC),
+                        c.epilogue);
+      else
+        blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha, dA, dB, dBias, dC,
+                        c.epilogue);
+      const auto got = download(dC, M * N);
+      const std::vector<int32_t> got32(got.begin(), got.end());
+      const std::vector<int32_t> ref32(ref.begin(), ref.end());
+      checkEqual(got32.data(), ref32.data(), M * N, name);
+    }
+  }
+}
+
