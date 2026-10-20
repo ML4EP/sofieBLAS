@@ -422,7 +422,7 @@ public:
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
     const auto epi = toApiEpilogue(epilogue);
     if constexpr (!Api::SupportsBiasBatchStride) {
-      if (epi != Api::EpilogueDefault && strideBias != 0 && batchCount > 1) {
+      if (usesBias(epi) && strideBias != 0 && batchCount > 1) {
         for (int b = 0; b < batchCount; ++b)
           gemmStridedBatched(transa, transb, m, n, k, alpha, A + b * strideA,
                              lda, 0, B + b * strideB, ldb, 0, beta,
@@ -471,7 +471,7 @@ public:
     auto &e = it->second;
 
     auto &desc = getOrCreateDesc(opA, opB, epi);
-    if (epi != Api::EpilogueDefault) {
+    if (usesBias(epi)) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias, sizeof(bias)));
       if constexpr (Api::SupportsBiasBatchStride) {
@@ -640,6 +640,11 @@ private:
     return Api::EpilogueDefault;
   }
 
+  // true for the epilogues that add a bias vector
+  static bool usesBias(typename Api::Epilogue epilogue) {
+    return epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu;
+  }
+
   // the configuration of a batched multiply: transposes, epilogue, m, n, k,
   // the leading dimensions, the three strides and the batch count
   using BatchKey = std::array<long long, 13>;
@@ -732,7 +737,7 @@ private:
                                              sizeof(epilogue)));
     // For bias epilogues: set a non-null dummy pointer so the descriptor is
     // valid for the heuristic query, and the bias type the caller declared.
-    if (epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu) {
+    if (usesBias(epilogue)) {
       const void *dummy = d_workspace;
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &dummy, sizeof(dummy)));
@@ -836,7 +841,7 @@ private:
     // Retrieve the cached descriptor and patch the real bias pointer in-place
     auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
                                  scaleType, biasType);
-    if (bias_ptr) {
+    if (bias_ptr && usesBias(epilogue)) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
     }
