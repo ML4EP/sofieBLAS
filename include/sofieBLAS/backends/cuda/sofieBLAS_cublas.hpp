@@ -15,6 +15,7 @@
 #include <alpaka/alpaka.hpp>
 #include <cublasLt.h>
 #include <cublas_v2.h>
+#include <cuda_fp16.h>
 
 #define CHECK_CUDA(err)                                                        \
   if ((err) != cudaSuccess) {                                                  \
@@ -57,6 +58,7 @@ struct CublasLtApi {
   static constexpr auto ComputeF32 = CUBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = CUBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = CUDA_R_32F;
+  static constexpr auto RealF16 = CUDA_R_16F;
   static constexpr auto RealI8  = CUDA_R_8I;
   static constexpr auto RealI32 = CUDA_R_32I;
   static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;

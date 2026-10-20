@@ -15,6 +15,7 @@
 #include <alpaka/alpaka.hpp>
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
+#include <hip/hip_fp16.h>
 
 #define CHECK_HIP(err)                                                         \
   if ((err) != hipSuccess) {                                                   \
@@ -57,6 +58,7 @@ struct HipblasLtApi {
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
+  static constexpr auto RealF16 = HIP_R_16F;
   static constexpr auto RealI8  = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;

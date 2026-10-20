@@ -38,9 +38,11 @@ struct DescKey {
   int epilogue; // backend epilogue enum encoded as int
   int computeType;
   int scaleType;
+  int biasType; // backend data-type enum of the bias
   bool operator==(const DescKey &o) const noexcept {
     return transA == o.transA && transB == o.transB && epilogue == o.epilogue &&
-           computeType == o.computeType && scaleType == o.scaleType;
+           computeType == o.computeType && scaleType == o.scaleType &&
+           biasType == o.biasType;
   }
 };
 
@@ -51,6 +53,7 @@ struct DescKeyHash {
                     static_cast<std::size_t>(k.epilogue);
     h = h * 31u + static_cast<std::size_t>(k.computeType);
     h = h * 31u + static_cast<std::size_t>(k.scaleType);
+    h = h * 31u + static_cast<std::size_t>(k.biasType);
     return h ^ (h >> 16);
   }
 };
@@ -59,9 +62,12 @@ struct AlgoKey {
   DescKey dk;
   std::size_t rowsA, colsA; // physical dimensions of A in layoutStore
   std::size_t rowsB, colsB; // physical dimensions of B in layoutStore
+  int typeAB;               // backend data-type enum of A and B
+  int typeC;                // backend data-type enum of C
   bool operator==(const AlgoKey &o) const noexcept {
     return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
-           rowsB == o.rowsB && colsB == o.colsB;
+           rowsB == o.rowsB && colsB == o.colsB && typeAB == o.typeAB &&
+           typeC == o.typeC;
   }
 };
 
@@ -76,6 +82,8 @@ struct AlgoKeyHash {
     mix(k.colsA);
     mix(k.rowsB);
     mix(k.colsB);
+    mix(static_cast<std::size_t>(k.typeAB));
+    mix(static_cast<std::size_t>(k.typeC));
     return h;
   }
 };
@@ -202,6 +210,9 @@ public:
   // C are any alpaka buffers or views (anything alpaka::getPtrNative
   // accepts), and one raw device-pointer overload, which generated code
   // calls.
+
+  // float GEMMs: A, B, bias and C all in float. gemm, gemmrelu and gemmgelu
+  // add a bias and apply the named activation; matmul has no bias.
   template <typename TA, typename TB, typename TBias, typename TC>
   inline void gemm(char transa, char transb, unsigned int m, unsigned int n,
                    unsigned int k, float alpha, TA const &A, TB const &B,
@@ -299,6 +310,8 @@ public:
         batchCount));
   }
 
+  // int8 GEMMs: A and B in int8, summed in int32. Without alpha, C is int32
+  // and exact; with a float alpha, a float bias and an epilogue, C is int8.
   template <typename TA, typename TB, typename TC>
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k,
@@ -334,7 +347,7 @@ public:
                   alpaka::getPtrNative(B), &beta, c, c,
                   alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
-                  Api::RealF32, Api::RealI8, Api::RealI8);
+                  Api::RealF32, Api::RealI8, Api::RealI8, Api::RealF32);
   }
 
   inline void int8Matmul(char transa, char transb, unsigned int m,
@@ -345,7 +358,8 @@ public:
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
                   toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8);
+                  Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8,
+                  Api::RealF32);
   }
 
   // Checks whether the library has a kernel for the int8-output int8Matmul
@@ -360,7 +374,63 @@ public:
                             toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
                             layoutKeyB(transb, k, n), {m, n}, Api::ComputeI32,
                             Api::RealF32, Api::RealI8, Api::RealI8,
+                            Api::RealF32,
                             /*exitOnNoAlgorithm=*/false) != nullptr;
+  }
+
+  // fp16 GEMMs: A and B in half precision (__half), summed and scaled in
+  // float. matmulFp16Fp16 writes a half-precision C with a half-precision
+  // bias, matmulFp16Fp32 a float C with a float bias.
+  template <typename TA, typename TB, typename TBias, typename TC>
+  inline void matmulFp16Fp16(char transa, char transb, unsigned int m,
+                             unsigned int n, unsigned int k, float alpha,
+                             TA const &A, TB const &B, float beta, TBias &bias,
+                             TC &C, Epilogue epilogue = Epilogue::Default) {
+    auto *c = alpaka::getPtrNative(C);
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, c, c,
+                  alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n}, Api::ComputeF32,
+                  Api::RealF32, Api::RealF16, Api::RealF16, Api::RealF16);
+  }
+
+  inline void matmulFp16Fp16(char transa, char transb, unsigned int m,
+                             unsigned int n, unsigned int k, float alpha,
+                             const __half *A, const __half *B, float beta,
+                             const __half *bias, __half *C,
+                             Epilogue epilogue = Epilogue::Default) {
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  Api::ComputeF32, Api::RealF32, Api::RealF16, Api::RealF16,
+                  Api::RealF16);
+  }
+
+  template <typename TA, typename TB, typename TBias, typename TC>
+  inline void matmulFp16Fp32(char transa, char transb, unsigned int m,
+                             unsigned int n, unsigned int k, float alpha,
+                             TA const &A, TB const &B, float beta, TBias &bias,
+                             TC &C, Epilogue epilogue = Epilogue::Default) {
+    auto *c = alpaka::getPtrNative(C);
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(B), &beta, c, c,
+                  alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
+                  layoutKeyB(transb, k, n), {m, n}, Api::ComputeF32,
+                  Api::RealF32, Api::RealF16, Api::RealF32, Api::RealF32);
+  }
+
+  inline void matmulFp16Fp32(char transa, char transb, unsigned int m,
+                             unsigned int n, unsigned int k, float alpha,
+                             const __half *A, const __half *B, float beta,
+                             const float *bias, float *C,
+                             Epilogue epilogue = Epilogue::Default) {
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  Api::ComputeF32, Api::RealF32, Api::RealF16, Api::RealF32,
+                  Api::RealF32);
   }
 
 private:
@@ -398,9 +468,10 @@ private:
   getOrCreateDesc(typename Api::Operation transA, typename Api::Operation transB,
                   typename Api::Epilogue epilogue,
                   decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                  decltype(Api::RealF32) scaleType = Api::RealF32) {
+                  decltype(Api::RealF32) scaleType = Api::RealF32,
+                  decltype(Api::RealF32) biasType = Api::RealF32) {
     DescKey key{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                (int)scaleType};
+                (int)scaleType, (int)biasType};
     auto it = descStore.find(key);
     if (it != descStore.end())
       return it->second;
@@ -414,14 +485,13 @@ private:
     SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescEpilogue, &epilogue,
                                              sizeof(epilogue)));
     // For bias epilogues: set a non-null dummy pointer so the descriptor is
-    // valid for the heuristic query, and give the bias the scale type (FP8
-    // will need BF16 here).
+    // valid for the heuristic query, and the bias type the caller declared.
     if (epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu) {
       const void *dummy = d_workspace;
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &dummy, sizeof(dummy)));
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasDataType,
-                                               &scaleType, sizeof(scaleType)));
+                                               &biasType, sizeof(biasType)));
     }
     descStore.emplace(key, desc);
     return descStore.at(key);
@@ -438,13 +508,16 @@ private:
                    decltype(Api::RealF32) scaleType = Api::RealF32,
                    decltype(Api::RealF32) typeAB = Api::RealF32,
                    decltype(Api::RealF32) typeC = Api::RealF32,
+                   decltype(Api::RealF32) biasType = Api::RealF32,
                    bool exitOnNoAlgorithm = true) {
     AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                 (int)scaleType},
+                 (int)scaleType, (int)biasType},
                 shapeA.first,
                 shapeA.second,
                 shapeB.first,
-                shapeB.second};
+                shapeB.second,
+                (int)typeAB,
+                (int)typeC};
     auto it = algoCache.find(key);
     if (it != algoCache.end()) {
       if (algoCacheLimit)
@@ -452,8 +525,8 @@ private:
       return &it->second.h;
     }
 
-    auto &desc =
-        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
+    auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
+                                 scaleType, biasType);
     auto lA = getOrCreateLayout(shapeA, shapeA.first, typeAB);
     auto lB = getOrCreateLayout(shapeB, shapeB.first, typeAB);
     auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
@@ -498,14 +571,15 @@ private:
                      decltype(Api::ComputeF32) computeType = Api::ComputeF32,
                      decltype(Api::RealF32) scaleType = Api::RealF32,
                      decltype(Api::RealF32) typeAB = Api::RealF32,
-                     decltype(Api::RealF32) typeC = Api::RealF32) {
+                     decltype(Api::RealF32) typeC = Api::RealF32,
+                     decltype(Api::RealF32) biasType = Api::RealF32) {
     // Retrieve (or lazily compute) the cached algorithm for this shape
     auto *h = getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC,
-                               computeType, scaleType, typeAB, typeC);
+                               computeType, scaleType, typeAB, typeC, biasType);
 
     // Retrieve the cached descriptor and patch the real bias pointer in-place
-    auto &desc =
-        getOrCreateDesc(transA, transB, epilogue, computeType, scaleType);
+    auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
+                                 scaleType, biasType);
     if (bias_ptr) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
