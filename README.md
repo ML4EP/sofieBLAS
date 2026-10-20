@@ -97,8 +97,10 @@ blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
 The GPU backends (`BlasCuda`, `BlasHip`) additionally expose 
-- `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues)
+- `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues). Note that the GELU epilogue of cuBLASLt/hipBLASLt is the tanh approximation, so it differs from the erf-based CPU `gemmgelu` by up to ~1e-3.
 - `gemmStridedBatched` for batched gemm operations through strides
+- an overload of `gemmStridedBatched` with a fused `Epilogue` (bias, ReLU or GELU) and a bias vector with its own batch stride: `blas.gemmStridedBatched('N', 'N', m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount, Epilogue::ReluBias, bias, strideBias)`. A stride of 0 shares the matrix between the batches (broadcast).
+- overloads of `matmul`/`gemm`/`gemmrelu`/`gemmgelu` taking the leading dimensions of A and B (`blas.gemmrelu('N', 'N', m, n, k, alpha, A, lda, B, ldb, beta, bias, C)`), to multiply padded or transposed views of larger buffers with the fused epilogues. `lda`/`ldb` are the column-major leading dimensions (at least the physical number of rows of the matrix) and C is dense. The CPU backends provide the same overloads for raw pointers.
 - `addOperationConfig` that creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call (see below).
 
 ## GEMM call instantiation and the algorithm cache

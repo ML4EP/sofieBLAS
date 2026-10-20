@@ -2,10 +2,13 @@
 
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <list>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -67,6 +70,10 @@ struct HipblasLtApi {
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
   static constexpr auto DescBiasDataType =
       HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr bool SupportsBiasBatchStride = false;
+  static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutStridedBatchOffset =
+      HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
   static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
@@ -83,6 +90,7 @@ struct HipblasLtApi {
       hipblasLtMatmulPreferenceSetAttribute;
   static constexpr auto layoutCreate = hipblasLtMatrixLayoutCreate;
   static constexpr auto layoutDestroy = hipblasLtMatrixLayoutDestroy;
+  static constexpr auto layoutSetAttribute = hipblasLtMatrixLayoutSetAttribute;
   static constexpr auto descCreate = hipblasLtMatmulDescCreate;
   static constexpr auto descDestroy = hipblasLtMatmulDescDestroy;
   static constexpr auto descSetAttribute = hipblasLtMatmulDescSetAttribute;

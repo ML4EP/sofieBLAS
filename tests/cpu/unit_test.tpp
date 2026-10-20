@@ -262,6 +262,68 @@ static void runCpuTests() {
     }
   }
 
+  // --- leading dimensions larger than the number of rows ---
+  {
+    std::vector<float> Bn(K * N), Bd(M * N);
+    fillSeq(Bn.data(), K * N, 1.f, 0.5f);
+    for (bool tA : {false, true}) {
+      const int rowsA = tA ? K : M, colsA = tA ? M : K;
+      const unsigned lda = rowsA + 3, ldb = K + 2;
+      std::vector<float> An(M * K);
+      fillSeq(An.data(), M * K, 0.3f, 0.2f);
+      auto pA = padColMajor(An.data(), rowsA, colsA, lda);
+      auto pB = padColMajor(Bn.data(), K, N, ldb);
+      const std::string tag = std::string(tA ? "T" : "N") + "N";
+
+      std::fill(ref.begin(), ref.end(), 0.f);
+      refMatmul(ref.data(), An.data(), Bn.data(), M, N, K, 1.f, 0.f, tA, false);
+      fillVal(C, M * N, 0.f);
+      blas.matmul(tA ? 'T' : 'N', 'N', M, N, K, 1.f, pA.data(), lda, pB.data(),
+                  ldb, 0.f, C);
+      checkClose(C, ref.data(), M * N, "cpu::matmul ld " + tag);
+
+      refGemmRelu(ref.data(), An.data(), Bn.data(), bias, M, N, K, 1.f, 0.f,
+                  tA, false);
+      blas.gemmrelu(tA ? 'T' : 'N', 'N', M, N, K, 1.f, pA.data(), lda,
+                    pB.data(), ldb, 0.f, bias, C);
+      checkClose(C, ref.data(), M * N, "cpu::gemmrelu ld " + tag);
+    }
+  }
+
+  // --- batched multiply with a fused epilogue ---
+  {
+    constexpr int BATCH = 3, LDA = M + 2;
+    for (bool sharedA : {true, false})
+      for (Epilogue epi :
+           {Epilogue::Bias, Epilogue::ReluBias, Epilogue::GeluBias}) {
+        const long long strideA = sharedA ? 0 : LDA * K;
+        const long long strideB = sharedA ? K * N : 0;
+        const long long strideBias = sharedA ? M : 0;
+        std::vector<float> denseA(M * K * (sharedA ? 1 : BATCH));
+        fillSeq(denseA.data(), static_cast<int>(denseA.size()), -1.f, 0.3f);
+        std::vector<float> padA(LDA * K * (sharedA ? 1 : BATCH), 99.f);
+        for (size_t b = 0; b < (sharedA ? 1u : BATCH); ++b)
+          for (int p = 0; p < K; ++p)
+            for (int i = 0; i < M; ++i)
+              padA[b * LDA * K + p * LDA + i] = denseA[b * M * K + p * M + i];
+        std::vector<float> Bb(K * N * (sharedA ? BATCH : 1));
+        fillSeq(Bb.data(), static_cast<int>(Bb.size()), -2.f, 0.2f);
+        std::vector<float> biasv(M * BATCH);
+        fillSeq(biasv.data(), static_cast<int>(biasv.size()), -1.5f, 0.4f);
+        std::vector<float> got(M * N * BATCH), want(M * N * BATCH);
+        refBatchedEpilogue(want.data(), denseA.data(), M, sharedA ? 0 : M * K,
+                           Bb.data(), strideB, biasv.data(), strideBias, M, N,
+                           K, BATCH, epi);
+        blas.gemmStridedBatched('N', 'N', M, N, K, 1.f, padA.data(), LDA,
+                                strideA, Bb.data(), K, strideB, 0.f, got.data(),
+                                M, M * N, BATCH, epi, biasv.data(), strideBias);
+        checkClose(got.data(), want.data(), M * N * BATCH,
+                   std::string("cpu::gemmStridedBatched epilogue ") +
+                       (sharedA ? "A shared " : "B shared ") +
+                       std::to_string(static_cast<int>(epi)));
+      }
+  }
+
   // --- edge: identity-like (square, known result) ---
   {
     constexpr int S = 3;
