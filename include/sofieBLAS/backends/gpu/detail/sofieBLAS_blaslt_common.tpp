@@ -51,13 +51,10 @@ struct DescKey {
   int transA; // backend transpose enum encoded as int
   int transB;
   int epilogue; // backend epilogue enum encoded as int
-  int computeType;
-  int scaleType;
-  int biasType; // backend data-type enum of the bias
+  int typeD;    // backend data-type enum of the output D
   bool operator==(const DescKey &o) const noexcept {
     return transA == o.transA && transB == o.transB && epilogue == o.epilogue &&
-           computeType == o.computeType && scaleType == o.scaleType &&
-           biasType == o.biasType;
+           typeD == o.typeD;
   }
 };
 
@@ -66,9 +63,7 @@ struct DescKeyHash {
     std::size_t h = static_cast<std::size_t>(k.transA) * 97u +
                     static_cast<std::size_t>(k.transB) * 31u +
                     static_cast<std::size_t>(k.epilogue);
-    h = h * 31u + static_cast<std::size_t>(k.computeType);
-    h = h * 31u + static_cast<std::size_t>(k.scaleType);
-    h = h * 31u + static_cast<std::size_t>(k.biasType);
+    h = h * 31u + static_cast<std::size_t>(k.typeD);
     return h ^ (h >> 16);
   }
 };
@@ -78,12 +73,10 @@ struct AlgoKey {
   std::size_t rowsA, colsA; // physical dimensions of A in layoutStore
   std::size_t rowsB, colsB; // physical dimensions of B in layoutStore
   std::size_t ldA = 0, ldB = 0; // leading dimensions of A and B, 0 when dense
-  int typeAB;               // backend data-type enum of A and B
-  int typeC;                // backend data-type enum of C
   bool operator==(const AlgoKey &o) const noexcept {
     return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
            rowsB == o.rowsB && colsB == o.colsB && ldA == o.ldA &&
-           ldB == o.ldB && typeAB == o.typeAB && typeC == o.typeC;
+           ldB == o.ldB;
   }
 };
 
@@ -100,8 +93,6 @@ struct AlgoKeyHash {
     mix(k.colsB);
     mix(k.ldA);
     mix(k.ldB);
-    mix(static_cast<std::size_t>(k.typeAB));
-    mix(static_cast<std::size_t>(k.typeC));
     return h;
   }
 };
@@ -121,8 +112,6 @@ template <class Api> class BlasLt {
   // rows (padded or sub-matrix views); the dense ones are in layoutStore
   std::unordered_map<LdKey, typename Api::Layout, LdKeyHash> ldLayoutStore;
 
-  std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash> descStore;
-
   // One cache entry per exact GEMM configuration: the heuristic result to
   // reuse, plus this entry's position in the recency list so a hit can mark
   // itself most-recently-used in O(1). The position is only maintained when a
@@ -131,14 +120,29 @@ template <class Api> class BlasLt {
     typename Api::HeuristicResult h{};
     std::list<AlgoKey>::iterator lru{};
   };
-  std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
-  // entries ordered most- to least-recently used; drives eviction
-  std::list<AlgoKey> lruOrder;
-  // 0 = unbounded
+
+  // The descriptors and algorithms of one group of input types. Each group
+  // has its own set, so two groups never share a descriptor (or what is set on
+  // it per call) or an algorithm. Inside a group the output type decides every
+  // other type, so it is the only type in the keys. Layouts are shared by all
+  // groups: their key holds the element type and nothing is set on them per
+  // call.
+  struct GemmCaches {
+    std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash>
+        descStore;
+    std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
+    // entries ordered most- to least-recently used; drives eviction
+    std::list<AlgoKey> lruOrder;
+  };
+  GemmCaches floatCaches, fp16Caches, int8Caches;
+  // 0 = unbounded; the limit applies to each group
   std::size_t algoCacheLimit = 0;
 
 public:
-  std::size_t algoCacheSize() const { return algoCache.size(); }
+  std::size_t algoCacheSize() const {
+    return floatCaches.algoCache.size() + fp16Caches.algoCache.size() +
+           int8Caches.algoCache.size();
+  }
 
   BlasLt(const BlasLt &) = delete;
   BlasLt &operator=(const BlasLt &) = delete;
@@ -173,9 +177,10 @@ public:
       Api::layoutDestroy(entry.lB);
       Api::layoutDestroy(entry.lC);
     }
-    for (auto &[key, desc] : descStore)
-      if (desc)
-        Api::descDestroy(desc);
+    for (auto *caches : {&floatCaches, &fp16Caches, &int8Caches})
+      for (auto &[key, desc] : caches->descStore)
+        if (desc)
+          Api::descDestroy(desc);
     if (preference)
       Api::prefDestroy(preference);
     if (ltHandle)
@@ -645,6 +650,15 @@ private:
     return epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu;
   }
 
+  // the cache set of the group a GEMM belongs to, chosen by the type of A and B
+  GemmCaches &cachesFor(decltype(Api::RealF32) typeAB) {
+    if (typeAB == Api::RealF16)
+      return fp16Caches;
+    if (typeAB == Api::RealI8)
+      return int8Caches;
+    return floatCaches;
+  }
+
   // the configuration of a batched multiply: transposes, epilogue, m, n, k,
   // the leading dimensions, the three strides and the batch count
   using BatchKey = std::array<long long, 13>;
@@ -720,9 +734,11 @@ private:
                   typename Api::Epilogue epilogue,
                   decltype(Api::ComputeF32) computeType = Api::ComputeF32,
                   decltype(Api::RealF32) scaleType = Api::RealF32,
-                  decltype(Api::RealF32) biasType = Api::RealF32) {
-    DescKey key{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                (int)scaleType, (int)biasType};
+                  decltype(Api::RealF32) biasType = Api::RealF32,
+                  decltype(Api::RealF32) typeAB = Api::RealF32,
+                  decltype(Api::RealF32) typeD = Api::RealF32) {
+    auto &descStore = cachesFor(typeAB).descStore;
+    DescKey key{(int)transA, (int)transB, (int)epilogue, (int)typeD};
     auto it = descStore.find(key);
     if (it != descStore.end())
       return it->second;
@@ -767,16 +783,15 @@ private:
       ldA = 0;
     if (ldB == shapeB.first)
       ldB = 0;
-    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)computeType,
-                 (int)scaleType, (int)biasType},
+    auto &algoCache = cachesFor(typeAB).algoCache;
+    auto &lruOrder = cachesFor(typeAB).lruOrder;
+    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)typeC},
                 shapeA.first,
                 shapeA.second,
                 shapeB.first,
                 shapeB.second,
                 ldA,
-                ldB,
-                (int)typeAB,
-                (int)typeC};
+                ldB};
     auto it = algoCache.find(key);
     if (it != algoCache.end()) {
       if (algoCacheLimit)
@@ -785,7 +800,7 @@ private:
     }
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType);
+                                 scaleType, biasType, typeAB, typeC);
     auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
     auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
     auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
@@ -840,7 +855,7 @@ private:
 
     // Retrieve the cached descriptor and patch the real bias pointer in-place
     auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType);
+                                 scaleType, biasType, typeAB, typeC);
     if (bias_ptr && usesBias(epilogue)) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
