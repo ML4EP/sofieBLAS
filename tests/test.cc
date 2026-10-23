@@ -198,6 +198,61 @@ static int ldaFor(char trans, int m, int k) {
 static int ldbFor(char trans, int k, int n) {
   return (trans == 'N' || trans == 'n') ? k : n;
 }
+
+// C = epilogue(alpha * op(A) * op(B) + beta * C + bias), with bias one value
+// per row of C (unused by Default and Relu), column-major, in float
+static void refEpilogue(float *C, const float *A, const float *B,
+                        const float *bias, int m, int n, int k, float alpha,
+                        float beta, bool transA, bool transB,
+                        Epilogue epilogue) {
+  refMatmul(C, A, B, m, n, k, alpha, beta, transA, transB);
+  constexpr float kInvSqrt2 = 0.7071067811865476f;
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < m; ++i) {
+      float &x = C[j * m + i];
+      if (epilogue != Epilogue::Default && epilogue != Epilogue::Relu)
+        x += bias[i];
+      if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
+        x = x > 0.f ? x : 0.f;
+      else if (epilogue == Epilogue::GeluBias)
+        x *= 0.5f * (1.f + std::erff(x * kInvSqrt2));
+    }
+}
+
+// int8 output: alpha * op(A) * op(B) + bias in float, clamped at 0 by the
+// relu epilogues, rounded to the nearest integer and saturated to [-128, 127]
+static void refMatmulI8Out(int8_t *C, const int8_t *A, const int8_t *B,
+                           const float *bias, int m, int n, int k, float alpha,
+                           bool transA, bool transB, Epilogue epilogue) {
+  std::vector<int32_t> acc(static_cast<std::size_t>(m) * n);
+  refMatmulI8(acc.data(), A, B, m, n, k, transA, transB);
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < m; ++i) {
+      float x = alpha * static_cast<float>(acc[j * m + i]);
+      if (epilogue == Epilogue::Bias || epilogue == Epilogue::ReluBias)
+        x += bias[i];
+      if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
+        x = x > 0.f ? x : 0.f;
+      x = std::nearbyint(x);
+      C[j * m + i] = static_cast<int8_t>(std::min(127.f, std::max(-128.f, x)));
+    }
+}
+
+// host-side conversions with the fp16 helpers of cuda_fp16.h / hip_fp16.h
+static std::vector<__half> toHalf(const std::vector<float> &v) {
+  std::vector<__half> h(v.size());
+  for (std::size_t i = 0; i < v.size(); ++i)
+    h[i] = __float2half(v[i]);
+  return h;
+}
+
+static std::vector<float> fromHalf(const __half *h, std::size_t n) {
+  std::vector<float> v(n);
+  for (std::size_t i = 0; i < n; ++i)
+    v[i] = __half2float(h[i]);
+  return v;
+}
+
 #include "gpu/unit_test.tpp"
 #endif
 
@@ -212,10 +267,12 @@ int main() {
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
   runGpuTests<alpaka::TagGpuCudaRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>();
+  runGpuLowPrecisionTests<alpaka::TagGpuCudaRt>();
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
   runGpuTests<alpaka::TagGpuHipRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuHipRt>();
+  runGpuLowPrecisionTests<alpaka::TagGpuHipRt>();
 #endif
 
   std::cout << "\n";
