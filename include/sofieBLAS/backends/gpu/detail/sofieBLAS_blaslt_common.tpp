@@ -134,14 +134,19 @@ template <class Api> class BlasLt {
     // entries ordered most- to least-recently used; drives eviction
     std::list<AlgoKey> lruOrder;
   };
-  GemmCaches floatCaches, fp16Caches, int8Caches;
+  GemmCaches floatCaches, fp16Caches, int8Caches, fp8Caches;
   // 0 = unbounded; the limit applies to each group
   std::size_t algoCacheLimit = 0;
 
 public:
+  // the bf16 and fp8 element types of this backend, for the fp8 GEMMs
+  using Bf16 = typename Api::Bf16;
+  using Fp8E4M3 = typename Api::Fp8E4M3;
+  using Fp8E5M2 = typename Api::Fp8E5M2;
+
   std::size_t algoCacheSize() const {
     return floatCaches.algoCache.size() + fp16Caches.algoCache.size() +
-           int8Caches.algoCache.size();
+           int8Caches.algoCache.size() + fp8Caches.algoCache.size();
   }
 
   BlasLt(const BlasLt &) = delete;
@@ -177,7 +182,7 @@ public:
       Api::layoutDestroy(entry.lB);
       Api::layoutDestroy(entry.lC);
     }
-    for (auto *caches : {&floatCaches, &fp16Caches, &int8Caches})
+    for (auto *caches : {&floatCaches, &fp16Caches, &int8Caches, &fp8Caches})
       for (auto &[key, desc] : caches->descStore)
         if (desc)
           Api::descDestroy(desc);
@@ -626,6 +631,145 @@ public:
                   Api::RealF32, Api::RealF32);
   }
 
+  // fp8 GEMMs: A and B in FP8 E4M3, each with its own scale (a device pointer
+  // to one float), summed and scaled in float, with beta 0. The bias, for the
+  // epilogues that add one, is BF16. The output is float, half, bf16, or FP8
+  // (E4M3 or E5M2) with a scale of its own. cuBLASLt runs fp8 only as TN (A
+  // transposed, B not).
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC>
+  inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            TA const &A, TSA const &scaleA, TB const &B,
+                            TSB const &scaleB, TBias &bias, TC &C,
+                            Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp32(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C), epilogue);
+  }
+
+  inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            const Fp8E4M3 *A, const float *scaleA,
+                            const Fp8E4M3 *B, const float *scaleB,
+                            const Bf16 *bias, float *C,
+                            Epilogue epilogue = Epilogue::Default) {
+    executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
+               Api::RealF32, nullptr, epilogue);
+  }
+
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC>
+  inline void matmulFp8Fp16(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            TA const &A, TSA const &scaleA, TB const &B,
+                            TSB const &scaleB, TBias &bias, TC &C,
+                            Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp16(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C), epilogue);
+  }
+
+  inline void matmulFp8Fp16(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            const Fp8E4M3 *A, const float *scaleA,
+                            const Fp8E4M3 *B, const float *scaleB,
+                            const Bf16 *bias, __half *C,
+                            Epilogue epilogue = Epilogue::Default) {
+    executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
+               Api::RealF16, nullptr, epilogue);
+  }
+
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC>
+  inline void matmulFp8Bf16(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            TA const &A, TSA const &scaleA, TB const &B,
+                            TSB const &scaleB, TBias &bias, TC &C,
+                            Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Bf16(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C), epilogue);
+  }
+
+  inline void matmulFp8Bf16(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            const Fp8E4M3 *A, const float *scaleA,
+                            const Fp8E4M3 *B, const float *scaleB,
+                            const Bf16 *bias, Bf16 *C,
+                            Epilogue epilogue = Epilogue::Default) {
+    executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
+               Api::RealBF16, nullptr, epilogue);
+  }
+
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC, typename TSD>
+  inline void matmulFp8Fp8(char transa, char transb, unsigned int m,
+                           unsigned int n, unsigned int k, float alpha,
+                           TA const &A, TSA const &scaleA, TB const &B,
+                           TSB const &scaleB, TBias &bias, TC &C,
+                           TSD const &scaleD,
+                           Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp8(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                 alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                 alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                 alpaka::getPtrNative(C), alpaka::getPtrNative(scaleD),
+                 epilogue);
+  }
+
+  inline void matmulFp8Fp8(char transa, char transb, unsigned int m,
+                           unsigned int n, unsigned int k, float alpha,
+                           const Fp8E4M3 *A, const float *scaleA,
+                           const Fp8E4M3 *B, const float *scaleB,
+                           const Bf16 *bias, Fp8E4M3 *C, const float *scaleD,
+                           Epilogue epilogue = Epilogue::Default) {
+    executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
+               Api::RealF8E4M3, scaleD, epilogue);
+  }
+
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC, typename TSD>
+  inline void matmulFp8E5m2(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            TA const &A, TSA const &scaleA, TB const &B,
+                            TSB const &scaleB, TBias &bias, TC &C,
+                            TSD const &scaleD,
+                            Epilogue epilogue = Epilogue::Default) {
+    matmulFp8E5m2(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C), alpaka::getPtrNative(scaleD),
+                  epilogue);
+  }
+
+  inline void matmulFp8E5m2(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            const Fp8E4M3 *A, const float *scaleA,
+                            const Fp8E4M3 *B, const float *scaleB,
+                            const Bf16 *bias, Fp8E5M2 *C,
+                            const float *scaleD,
+                            Epilogue epilogue = Epilogue::Default) {
+    executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
+               Api::RealF8E5M2, scaleD, epilogue);
+  }
+
+  // Checks whether the library has a kernel for matmulFp8Fp32 with these
+  // transposes, sizes and epilogue. Returns false instead of ending the
+  // process when it has none, for example on a GPU without fp8.
+  inline bool matmulFp8Supported(char transa, char transb, unsigned int m,
+                                 unsigned int n, unsigned int k,
+                                 Epilogue epilogue = Epilogue::Default) {
+    return getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
+                            toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
+                            layoutKeyB(transb, k, n), {m, n}, 0, 0,
+                            Api::ComputeF32, Api::RealF32, Api::RealF8E4M3,
+                            Api::RealF32, Api::RealBF16,
+                            /*exitOnNoAlgorithm=*/false) != nullptr;
+  }
+
 private:
   typename Api::Queue m_queue;
 
@@ -652,11 +796,40 @@ private:
 
   // the cache set of the group a GEMM belongs to, chosen by the type of A and B
   GemmCaches &cachesFor(decltype(Api::RealF32) typeAB) {
+    if (typeAB == Api::RealF32)
+      return floatCaches;
     if (typeAB == Api::RealF16)
       return fp16Caches;
     if (typeAB == Api::RealI8)
       return int8Caches;
-    return floatCaches;
+    if (typeAB == Api::RealF8E4M3)
+      return fp8Caches;
+    throw std::invalid_argument("sofieBLAS: no cache set for this input type");
+  }
+
+  static bool isFp8(decltype(Api::RealF32) type) {
+    return type == Api::RealF8E4M3 || type == Api::RealF8E5M2;
+  }
+
+  // the type of C: the library needs a 16-bit C when D is FP8 (beta is 0 for
+  // those, so C is never read); otherwise C has D's type
+  static decltype(Api::RealF32) cTypeFor(decltype(Api::RealF32) typeD) {
+    return isFp8(typeD) ? Api::RealBF16 : typeD;
+  }
+
+  // the shared body of the fp8 GEMMs: E4M3 inputs, float sum and scale,
+  // beta 0, BF16 bias, an output of type typeD (scaleD only for an FP8 one)
+  void executeFp8(char transa, char transb, unsigned int m, unsigned int n,
+                  unsigned int k, float alpha, const void *A,
+                  const float *scaleA, const void *B, const float *scaleB,
+                  const void *bias, void *C, decltype(Api::RealF32) typeD,
+                  const float *scaleD, Epilogue epilogue) {
+    const float beta = 0.f;
+    executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
+                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
+                  0, 0, Api::ComputeF32, Api::RealF32, Api::RealF8E4M3, typeD,
+                  Api::RealBF16, scaleA, scaleB, scaleD);
   }
 
   // the configuration of a batched multiply: transposes, epilogue, m, n, k,
@@ -760,6 +933,18 @@ private:
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasDataType,
                                                &biasType, sizeof(biasType)));
     }
+    // FP8: placeholder scale pointers, so the algorithm search sees a scaled
+    // multiply; the real ones are set on every call
+    if (typeAB == Api::RealF8E4M3) {
+      const void *dummy = d_workspace;
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescAScalePointer,
+                                               &dummy, sizeof(dummy)));
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBScalePointer,
+                                               &dummy, sizeof(dummy)));
+      if (isFp8(typeD))
+        SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescDScalePointer,
+                                                 &dummy, sizeof(dummy)));
+    }
     descStore.emplace(key, desc);
     return descStore.at(key);
   }
@@ -775,7 +960,7 @@ private:
                    decltype(Api::ComputeF32) computeType = Api::ComputeF32,
                    decltype(Api::RealF32) scaleType = Api::RealF32,
                    decltype(Api::RealF32) typeAB = Api::RealF32,
-                   decltype(Api::RealF32) typeC = Api::RealF32,
+                   decltype(Api::RealF32) typeD = Api::RealF32,
                    decltype(Api::RealF32) biasType = Api::RealF32,
                    bool exitOnNoAlgorithm = true) {
     // ldA/ldB are 0 for dense operands
@@ -785,7 +970,7 @@ private:
       ldB = 0;
     auto &algoCache = cachesFor(typeAB).algoCache;
     auto &lruOrder = cachesFor(typeAB).lruOrder;
-    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)typeC},
+    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)typeD},
                 shapeA.first,
                 shapeA.second,
                 shapeB.first,
@@ -800,13 +985,16 @@ private:
     }
 
     auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType, typeAB, typeC);
+                                 scaleType, biasType, typeAB, typeD);
     auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
     auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
+    auto lC = getOrCreateLayout(shapeC, shapeC.first, cTypeFor(typeD));
+    auto lD = cTypeFor(typeD) == typeD
+                  ? lC
+                  : getOrCreateLayout(shapeC, shapeC.first, typeD);
     typename Api::HeuristicResult h{};
     int returnedResults = 0;
-    const auto status = Api::getHeuristic(ltHandle, desc, lA, lB, lC, lC,
+    const auto status = Api::getHeuristic(ltHandle, desc, lA, lB, lC, lD,
                                           preference, 1, &h, &returnedResults);
     if (!exitOnNoAlgorithm && status == Api::StatusNotSupported)
       return nullptr;
@@ -846,26 +1034,42 @@ private:
                      decltype(Api::ComputeF32) computeType = Api::ComputeF32,
                      decltype(Api::RealF32) scaleType = Api::RealF32,
                      decltype(Api::RealF32) typeAB = Api::RealF32,
-                     decltype(Api::RealF32) typeC = Api::RealF32,
-                     decltype(Api::RealF32) biasType = Api::RealF32) {
+                     decltype(Api::RealF32) typeD = Api::RealF32,
+                     decltype(Api::RealF32) biasType = Api::RealF32,
+                     const float *scaleA = nullptr,
+                     const float *scaleB = nullptr,
+                     const float *scaleD = nullptr) {
     // Retrieve (or lazily compute) the cached algorithm for this shape
     auto *h = getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC,
-                               ldA, ldB, computeType, scaleType, typeAB, typeC,
+                               ldA, ldB, computeType, scaleType, typeAB, typeD,
                                biasType);
 
     // Retrieve the cached descriptor and patch the real bias pointer in-place
     auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType, typeAB, typeC);
+                                 scaleType, biasType, typeAB, typeD);
     if (bias_ptr && usesBias(epilogue)) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias_ptr, sizeof(bias_ptr)));
     }
+    // FP8: the scale pointers, set on every call like the bias pointer
+    if (scaleA)
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescAScalePointer,
+                                               &scaleA, sizeof(scaleA)));
+    if (scaleB)
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBScalePointer,
+                                               &scaleB, sizeof(scaleB)));
+    if (scaleD)
+      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescDScalePointer,
+                                               &scaleD, sizeof(scaleD)));
 
     auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
     auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, typeC);
+    auto lC = getOrCreateLayout(shapeC, shapeC.first, cTypeFor(typeD));
+    auto lD = cTypeFor(typeD) == typeD
+                  ? lC
+                  : getOrCreateLayout(shapeC, shapeC.first, typeD);
     SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, alpha, A, lA, B, lB, beta,
-                                   D_in, lC, C_out, lC, &h->algo, d_workspace,
+                                   D_in, lC, C_out, lD, &h->algo, d_workspace,
                                    workspaceSize, stream));
   }
 };

@@ -18,7 +18,9 @@
 #include <alpaka/alpaka.hpp>
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_fp8.h>
 
 #define CHECK_HIP(err)                                                         \
   if ((err) != hipSuccess) {                                                   \
@@ -49,6 +51,9 @@ struct HipblasLtApi {
   using HeuristicResult = hipblasLtMatmulHeuristicResult_t;
   using Operation = hipblasOperation_t;
   using Epilogue = hipblasLtEpilogue_t;
+  using Bf16 = __hip_bfloat16;
+  using Fp8E4M3 = __hip_fp8_e4m3;
+  using Fp8E5M2 = __hip_fp8_e5m2;
 
   static constexpr auto OpN = HIPBLAS_OP_N;
   static constexpr auto OpT = HIPBLAS_OP_T;
@@ -62,14 +67,19 @@ struct HipblasLtApi {
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
   static constexpr auto RealF16 = HIP_R_16F;
+  static constexpr auto RealBF16 = HIP_R_16BF;
+  static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3;
+  static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2;
   static constexpr auto RealI8  = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
-  static constexpr auto DescBiasDataType =
-      HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto DescBiasDataType = HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto DescAScalePointer = HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePointer = HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePointer = HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
   static constexpr bool SupportsBiasBatchStride = false;
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
