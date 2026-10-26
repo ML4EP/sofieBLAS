@@ -7,34 +7,29 @@
 
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
 
+#include "sofieBLAS/backends/cpu/detail/sofieBLAS_cblas_utils.hpp"
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 class BlasCpu {
 public:
-  BlasCpu(alpaka::QueueCpuBlocking &queue [[maybe_unused]]) {}
+  // the bf16 and fp8 element types of this backend, for the fp8 GEMMs
+  using Bf16 = SofieBf16;
+  using Fp8E4M3 = SofieFp8E4M3;
+  using Fp8E4M3Type = SofieFp8E4M3;
+  using Bf16Type = SofieBf16;
 
-  inline CBLAS_TRANSPOSE charToTranspose(char trans) {
-    switch (trans) {
-    case 'N':
-    case 'n':
-      return CblasNoTrans;
-    case 'T':
-    case 't':
-      return CblasTrans;
-    case 'C':
-    case 'c':
-      return CblasConjTrans;
-    default:
-      throw std::invalid_argument("Invalid transpose character.");
-    }
-  }
+  BlasCpu(alpaka::QueueCpuBlocking &queue [[maybe_unused]]) {}
 
   // C = alpha * op(A) * op(B) + beta * C  (no bias, leading dims inferred)
   template <typename T, typename TIdx>
@@ -48,10 +43,11 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B),
-                ldb, beta, alpaka::getPtrNative(C), static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha,
+                alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
+                beta, alpaka::getPtrNative(C), static_cast<int>(m));
   }
 
   template <typename T, typename TIdx>
@@ -68,10 +64,11 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B),
-                ldb, beta, alpaka::getPtrNative(C), static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha,
+                alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
+                beta, alpaka::getPtrNative(C), static_cast<int>(m));
   }
 
   // C = alpha * op(A) * op(B) + beta * bias + bias_vec  (bias_vec broadcast per
@@ -87,10 +84,11 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B),
-                ldb, 0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha,
+                alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
+                0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
     float *c = alpaka::getPtrNative(C);
     const float *b = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
@@ -113,10 +111,11 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B),
-                ldb, 0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha,
+                alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
+                0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
     float *c = alpaka::getPtrNative(C);
     const float *b = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
@@ -157,7 +156,7 @@ public:
   }
 
   // C = gelu(alpha * op(A) * op(B) + beta * bias + bias_vec)
-  // Uses the standard GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
+  // Uses the tanh approximation of GELU, as the GPU epilogues do
   template <typename T, typename TIdx>
   inline void gemmgelu(char transa, char transb, unsigned int m, unsigned int n,
                        unsigned int k, float alpha,
@@ -168,9 +167,8 @@ public:
                        alpaka::BufCpu<T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
     float *c = alpaka::getPtrNative(C);
-    constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] *= 0.5f * (1.0f + std::erff(c[i] * kInvSqrt2));
+      c[i] = sofieblas::cpu::geluTanh(c[i]);
   }
 
   template <typename T, typename TIdx>
@@ -186,23 +184,230 @@ public:
       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
     float *c = alpaka::getPtrNative(C);
-    constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] *= 0.5f * (1.0f + std::erff(c[i] * kInvSqrt2));
+      c[i] = sofieblas::cpu::geluTanh(c[i]);
   }
 
   template <typename TA, typename TB, typename TC>
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k, TA const &A,
                          TB const &B, TC &C) {
-    dispatchInt8Matmul(transa, transb, m, n, k, alpaka::getPtrNative(A),
-                      alpaka::getPtrNative(B), alpaka::getPtrNative(C));
+    sofieblas::cpu::dispatchInt8Matmul(
+        transa, transb, m, n, k, alpaka::getPtrNative(A),
+        alpaka::getPtrNative(B), alpaka::getPtrNative(C));
   }
 
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k, const int8_t *A,
                          const int8_t *B, int32_t *C) {
-    dispatchInt8Matmul(transa, transb, m, n, k, A, B, C);
+    sofieblas::cpu::dispatchInt8Matmul(transa, transb, m, n, k, A, B, C);
+  }
+
+  // int8 GEMMs with an int8 C, as on the GPU backends: the exact int32 sum is
+  // scaled in float by alpha, the bias (one value per row of C) is added, the
+  // relu epilogues clamp at 0, and the result is rounded to the nearest
+  // integer (ties to even) and saturated to [-128, 127]. Pointers are host
+  // pointers; bias may be null when the epilogue adds none.
+  template <typename TA, typename TB, typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, float alpha,
+                         TA const &A, TB const &B, TBias &bias, TC &C,
+                         Epilogue epilogue) {
+    int8Matmul(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+               alpaka::getPtrNative(B), alpaka::getPtrNative(bias),
+               alpaka::getPtrNative(C), epilogue);
+  }
+
+  inline void int8Matmul(char transa, char transb, unsigned int m,
+                         unsigned int n, unsigned int k, float alpha,
+                         const int8_t *A, const int8_t *B, const float *bias,
+                         int8_t *C, Epilogue epilogue) {
+    sofieblas::cpu::executeInt8Out(transa, transb, m, n, k, &alpha, false, A, B,
+                                   bias, C, epilogue);
+  }
+
+  // as the int8-output int8Matmul, with one alpha per row of C (alphaVector
+  // holds m floats)
+  template <typename TAlpha, typename TA, typename TB, typename TBias,
+            typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulVectorAlpha(char transa, char transb, unsigned int m,
+                                    unsigned int n, unsigned int k,
+                                    TAlpha const &alphaVector, TA const &A,
+                                    TB const &B, TBias &bias, TC &C,
+                                    Epilogue epilogue) {
+    int8MatmulVectorAlpha(transa, transb, m, n, k,
+                          alpaka::getPtrNative(alphaVector),
+                          alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                          alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                          epilogue);
+  }
+
+  inline void int8MatmulVectorAlpha(char transa, char transb, unsigned int m,
+                                    unsigned int n, unsigned int k,
+                                    const float *alphaVector, const int8_t *A,
+                                    const int8_t *B, const float *bias,
+                                    int8_t *C, Epilogue epilogue) {
+    sofieblas::cpu::executeInt8Out(transa, transb, m, n, k, alphaVector, true,
+                                   A, B, bias, C, epilogue);
+  }
+
+  // Strided-batched int8 GEMMs: C_b = op(A_b) * op(B_b), X_b = X + b * strideX
+  // (strides in elements, dense matrices, 0 shares the matrix). The first
+  // writes the int32 sum, the second an int8 C as the int8-output int8Matmul
+  // with a bias shared by the batches.
+  template <typename TA, typename TB, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, TA const &A,
+                                       long long strideA, TB const &B,
+                                       long long strideB, TC &C,
+                                       long long strideC, int batchCount) {
+    int8MatmulStridedBatched(transa, transb, m, n, k, alpaka::getPtrNative(A),
+                             strideA, alpaka::getPtrNative(B), strideB,
+                             alpaka::getPtrNative(C), strideC, batchCount);
+  }
+
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, const int8_t *A,
+                                       long long strideA, const int8_t *B,
+                                       long long strideB, int32_t *C,
+                                       long long strideC, int batchCount) {
+    if (batchCount < 1)
+      throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
+    for (int b = 0; b < batchCount; ++b)
+      sofieblas::cpu::dispatchInt8Matmul(transa, transb, m, n, k,
+                                         A + b * strideA, B + b * strideB,
+                                         C + b * strideC);
+  }
+
+  template <typename TA, typename TB, typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, float alpha,
+                                       TA const &A, long long strideA,
+                                       TB const &B, long long strideB,
+                                       TBias &bias, TC &C, long long strideC,
+                                       int batchCount, Epilogue epilogue) {
+    int8MatmulStridedBatched(transa, transb, m, n, k, alpha,
+                             alpaka::getPtrNative(A), strideA,
+                             alpaka::getPtrNative(B), strideB,
+                             alpaka::getPtrNative(bias),
+                             alpaka::getPtrNative(C), strideC, batchCount,
+                             epilogue);
+  }
+
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, float alpha,
+                                       const int8_t *A, long long strideA,
+                                       const int8_t *B, long long strideB,
+                                       const float *bias, int8_t *C,
+                                       long long strideC, int batchCount,
+                                       Epilogue epilogue) {
+    if (batchCount < 1)
+      throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
+    for (int b = 0; b < batchCount; ++b)
+      sofieblas::cpu::executeInt8Out(transa, transb, m, n, k, &alpha, false,
+                                     A + b * strideA, B + b * strideB, bias,
+                                     C + b * strideC, epilogue);
+  }
+
+  // fp8 GEMMs, as on the GPU backends: A and B in FP8 E4M3, each with its own
+  // scale (a host pointer to one float), summed in float:
+  // C = epilogue(alpha * scaleA * scaleB * op(A) * op(B) + bias), with a BF16
+  // bias of one value per row of C. matmulFp8Fp32 writes a float C;
+  // matmulFp8Fp8 multiplies by scaleD and writes E4M3 (round to nearest even,
+  // saturated to +-448, NaN kept). The GELU epilogue is the tanh one.
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            TA const &A, TSA const &scaleA, TB const &B,
+                            TSB const &scaleB, TBias &bias, TC &C,
+                            Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp32(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                  alpaka::getPtrNative(C), epilogue);
+  }
+
+  inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
+                            unsigned int n, unsigned int k, float alpha,
+                            const Fp8E4M3 *A, const float *scaleA,
+                            const Fp8E4M3 *B, const float *scaleB,
+                            const Bf16 *bias, float *C,
+                            Epilogue epilogue = Epilogue::Default) {
+    sofieblas::cpu::executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B,
+                               scaleB, bias, C, epilogue);
+  }
+
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC, typename TSD,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void matmulFp8Fp8(char transa, char transb, unsigned int m,
+                           unsigned int n, unsigned int k, float alpha,
+                           TA const &A, TSA const &scaleA, TB const &B,
+                           TSB const &scaleB, TBias &bias, TC &C,
+                           TSD const &scaleD,
+                           Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp8(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+                 alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
+                 alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
+                 alpaka::getPtrNative(C), alpaka::getPtrNative(scaleD),
+                 epilogue);
+  }
+
+  inline void matmulFp8Fp8(char transa, char transb, unsigned int m,
+                           unsigned int n, unsigned int k, float alpha,
+                           const Fp8E4M3 *A, const float *scaleA,
+                           const Fp8E4M3 *B, const float *scaleB,
+                           const Bf16 *bias, Fp8E4M3 *C, const float *scaleD,
+                           Epilogue epilogue = Epilogue::Default) {
+    std::vector<float> out(static_cast<std::size_t>(m) * n);
+    sofieblas::cpu::executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B,
+                               scaleB, bias, out.data(), epilogue);
+    const float sD = *scaleD;
+    for (std::size_t i = 0; i < out.size(); ++i)
+      C[i] = sofieblas::cpu::floatToFp8E4M3(sD * out[i]);
+  }
+
+  // Strided-batched matmulFp8Fp32: X_b = X + b * strideX (strides in elements,
+  // dense matrices, 0 shares the matrix); scales and bias shared by the
+  // batches
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void matmulFp8Fp32StridedBatched(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha, TA const &A, TSA const &scaleA, long long strideA,
+      TB const &B, TSB const &scaleB, long long strideB, TBias &bias, TC &C,
+      long long strideC, int batchCount,
+      Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp32StridedBatched(
+        transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+        alpaka::getPtrNative(scaleA), strideA, alpaka::getPtrNative(B),
+        alpaka::getPtrNative(scaleB), strideB, alpaka::getPtrNative(bias),
+        alpaka::getPtrNative(C), strideC, batchCount, epilogue);
+  }
+
+  inline void matmulFp8Fp32StridedBatched(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha, const Fp8E4M3 *A, const float *scaleA, long long strideA,
+      const Fp8E4M3 *B, const float *scaleB, long long strideB,
+      const Bf16 *bias, float *C, long long strideC, int batchCount,
+      Epilogue epilogue = Epilogue::Default) {
+    if (batchCount < 1)
+      throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
+    for (int b = 0; b < batchCount; ++b)
+      sofieblas::cpu::executeFp8(transa, transb, m, n, k, alpha,
+                                 A + b * strideA, scaleA, B + b * strideB,
+                                 scaleB, bias, C + b * strideC, epilogue);
   }
 
   // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr
@@ -215,9 +420,10 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, A, lda, B, ldb, beta, C, static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha, A, lda, B, ldb,
+                beta, C, static_cast<int>(m));
   }
 
   template <typename T>
@@ -228,9 +434,10 @@ public:
                                                : static_cast<int>(k);
     int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
                                                : static_cast<int>(n);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, A, lda, B, ldb, 0.0f, C, static_cast<int>(m));
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha, A, lda, B, ldb,
+                0.0f, C, static_cast<int>(m));
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
         C[j * m + i] += beta * bias[j * m + i] + bias[i];
@@ -250,9 +457,8 @@ public:
                        unsigned int k, float alpha, T const *A, T const *B,
                        float beta, T *bias, T *C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
-    constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (unsigned int i = 0; i < m * n; ++i)
-      C[i] *= 0.5f * (1.0f + std::erff(C[i] * kInvSqrt2));
+      C[i] = sofieblas::cpu::geluTanh(C[i]);
   }
 
   // Variants taking the leading dimensions lda and ldb of A and B (column-major
@@ -262,11 +468,12 @@ public:
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, T const *A, unsigned int lda,
                      T const *B, unsigned int ldb, float beta, T *C) {
-    checkLeadingDims(transa, transb, m, n, k, lda, ldb);
-    cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                alpha, A, static_cast<int>(lda), B, static_cast<int>(ldb), beta,
-                C, static_cast<int>(m));
+    sofieblas::cpu::checkLeadingDims(transa, transb, m, n, k, lda, ldb);
+    cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                sofieblas::cpu::charToTranspose(transb), static_cast<int>(m),
+                static_cast<int>(n), static_cast<int>(k), alpha, A,
+                static_cast<int>(lda), B, static_cast<int>(ldb), beta, C,
+                static_cast<int>(m));
   }
 
   template <typename T>
@@ -295,9 +502,8 @@ public:
                        unsigned int lda, T const *B, unsigned int ldb,
                        float beta, T *bias, T *C) {
     gemm(transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, bias, C);
-    constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (unsigned int i = 0; i < m * n; ++i)
-      C[i] *= 0.5f * (1.0f + std::erff(C[i] * kInvSqrt2));
+      C[i] = sofieblas::cpu::geluTanh(C[i]);
   }
 
   // Batched multiply with a fused epilogue
@@ -314,17 +520,16 @@ public:
                                  long long strideBias = 0) {
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    checkLeadingDims(transa, transb, m, n, k, lda, ldb);
+    sofieblas::cpu::checkLeadingDims(transa, transb, m, n, k, lda, ldb);
     if (ldc < m)
       throw std::invalid_argument(
           "sofieBLAS: leading dimension smaller than the number of rows of "
           "the matrix.");
-    constexpr float kInvSqrt2 = 0.7071067811865476f;
     for (int b = 0; b < batchCount; ++b) {
       float *c = C + b * strideC;
-      cblas_sgemm(CblasColMajor, charToTranspose(transa),
-                  charToTranspose(transb), m, n, k, alpha, A + b * strideA,
-                  lda, B + b * strideB, ldb, beta, c, ldc);
+      cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
+                  sofieblas::cpu::charToTranspose(transb), m, n, k, alpha,
+                  A + b * strideA, lda, B + b * strideB, ldb, beta, c, ldc);
       if (epilogue == Epilogue::Default)
         continue;
       const float *bv = bias + b * strideBias;
@@ -335,88 +540,9 @@ public:
           if (epilogue == Epilogue::ReluBias)
             x = x > 0.0f ? x : 0.0f;
           else if (epilogue == Epilogue::GeluBias)
-            x *= 0.5f * (1.0f + std::erff(x * kInvSqrt2));
+            x = sofieblas::cpu::geluTanh(x);
         }
     }
-  }
-
-private:
-  static inline void checkLeadingDims(char transa, char transb, unsigned int m,
-                                      unsigned int n, unsigned int k,
-                                      unsigned int lda, unsigned int ldb) {
-    unsigned int rowsA = (transa == 'N' || transa == 'n') ? m : k;
-    unsigned int rowsB = (transb == 'N' || transb == 'n') ? k : n;
-    if (lda < rowsA || ldb < rowsB)
-      throw std::invalid_argument(
-          "sofieBLAS: leading dimension smaller than the number of rows of "
-          "the matrix.");
-  }
-
-  static inline void executeInt8Matmul(char transa, char transb,
-                                       unsigned int m, unsigned int n,
-                                       unsigned int k, const int8_t *A,
-                                       const int8_t *B, int32_t *C) {
-    bool ta = (transa == 'T' || transa == 't');
-    bool tb = (transb == 'T' || transb == 't');
-    int lda = ta ? static_cast<int>(k) : static_cast<int>(m);
-    int ldb = tb ? static_cast<int>(n) : static_cast<int>(k);
-    auto at = [](const int8_t *M, int row, int col, int ld) -> int32_t {
-      return M[col * ld + row];
-    };
-    for (unsigned int j = 0; j < n; ++j) {
-      for (unsigned int i = 0; i < m; ++i) {
-        int32_t sum = 0;
-        for (unsigned int p = 0; p < k; ++p) {
-          int32_t a = ta ? at(A, static_cast<int>(p), static_cast<int>(i), lda)
-                         : at(A, static_cast<int>(i), static_cast<int>(p), lda);
-          int32_t b = tb ? at(B, static_cast<int>(j), static_cast<int>(p), ldb)
-                         : at(B, static_cast<int>(p), static_cast<int>(j), ldb);
-          sum += a * b;
-        }
-        C[j * m + i] = sum;
-      }
-    }
-  }
-
-#if defined(SOFIEBLAS_USE_MKL)
-  static inline void executeInt8MatmulMKL(char transa, char transb,
-                                          unsigned int m, unsigned int n,
-                                          unsigned int k, const int8_t *A,
-                                          const int8_t *B, int32_t *C) {
-    bool ta = (transa == 'T' || transa == 't');
-    bool tb = (transb == 'T' || transb == 't');
-    int lda = ta ? static_cast<int>(k) : static_cast<int>(m);
-    int ldb = tb ? static_cast<int>(n) : static_cast<int>(k);
-    int ldc = static_cast<int>(m);
-
-    // B is stored as k*n contiguous int8 elements regardless of transb (the
-    // transpose flag only changes how those elements are interpreted).
-    std::vector<uint8_t> ub(static_cast<std::size_t>(k) *
-                            static_cast<std::size_t>(n));
-    for (std::size_t i = 0; i < ub.size(); ++i)
-      ub[i] = static_cast<uint8_t>(B[i]) ^ 0x80u;
-
-    const float alpha = 1.0f, beta = 0.0f;
-    const MKL_INT8 oa = 0, ob = -128;
-    const MKL_INT32 oc = 0;
-    cblas_gemm_s8u8s32(
-        CblasColMajor, ta ? CblasTrans : CblasNoTrans,
-        tb ? CblasTrans : CblasNoTrans, CblasFixOffset,
-        static_cast<MKL_INT>(m), static_cast<MKL_INT>(n),
-        static_cast<MKL_INT>(k), alpha, A, lda, oa, ub.data(), ldb, ob, beta,
-        C, ldc, &oc);
-  }
-#endif
-
-  static inline void dispatchInt8Matmul(char transa, char transb,
-                                        unsigned int m, unsigned int n,
-                                        unsigned int k, const int8_t *A,
-                                        const int8_t *B, int32_t *C) {
-#if defined(SOFIEBLAS_USE_MKL)
-    executeInt8MatmulMKL(transa, transb, m, n, k, A, B, C);
-#else
-    executeInt8Matmul(transa, transb, m, n, k, A, B, C);
-#endif
   }
 };
 
