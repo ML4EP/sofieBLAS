@@ -97,11 +97,18 @@ blas.matmul('N', 'N', size, size, size, 1.0f, dA, dB, 0.0f, dC);
 ```
 
 The GPU backends (`BlasCuda`, `BlasHip`) additionally expose 
-- `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues). Note that the GELU epilogue of cuBLASLt/hipBLASLt is the tanh approximation, so it differs from the erf-based CPU `gemmgelu` by up to ~1e-3.
+- `gemmrelu`/`gemmgelu` (fused bias + activation via cuBLASLt/hipBLASLt epilogues). The GELU is the **tanh approximation** (`0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))`) on every backend, the one the GPU epilogues compute, and the CPU `gemmgelu` follows it. It is the only GELU sofieBLAS supports: a caller may fuse a GELU into `Epilogue::GeluBias` only if it is this one (for ONNX `Gelu`, `approximate="tanh"`) and must otherwise leave it as a separate elementwise operator.
 - `gemmStridedBatched` for batched gemm operations through strides
 - an overload of `gemmStridedBatched` with a fused `Epilogue` (bias, ReLU or GELU) and a bias vector with its own batch stride: `blas.gemmStridedBatched('N', 'N', m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount, Epilogue::ReluBias, bias, strideBias)`. A stride of 0 shares the matrix between the batches (broadcast).
 - overloads of `matmul`/`gemm`/`gemmrelu`/`gemmgelu` taking the leading dimensions of A and B (`blas.gemmrelu('N', 'N', m, n, k, alpha, A, lda, B, ldb, beta, bias, C)`), to multiply padded or transposed views of larger buffers with the fused epilogues. `lda`/`ldb` are the column-major leading dimensions (at least the physical number of rows of the matrix) and C is dense. The CPU backends provide the same overloads for raw pointers.
 - `addOperationConfig` that creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call (see below).
+- Quantized multiplies, on the GPU backends and, with the same results, on the CPU backends:
+  - `int8Matmul` with an int32 C, or with a float `alpha`, a float bias and an `Epilogue` and an int8 C (`alpha * sum + bias`, ReLU, then rounded half to even and saturated to [-128, 127]);
+  - `int8MatmulVectorAlpha`, the int8-output multiply with one alpha per row of C (a vector of m floats); on CUDA (cuBLASLt has kernels for it with A transposed) and the CPU, not on HIP;
+  - `int8MatmulStridedBatched` (int32 or int8 C) and `matmulFp8Fp32StridedBatched`, over dense matrices with batch strides in elements (0 shares a matrix) and a bias shared by the batches;
+  - `matmulFp8Fp32` / `matmulFp8Fp8` (and on the GPU `matmulFp8Fp16` / `matmulFp8Bf16` / `matmulFp8E5m2`): FP8 E4M3 A and B with a scale each, a BF16 bias, and `C = scaleD * epilogue(alpha * scaleA * scaleB * sum + bias)` for an FP8 C.
+
+  On the GPU the int8 and FP8 kernels need A transposed (`'T', 'N'`) for the fused epilogues and the FP8 types, and dimensions aligned to 4 (int8) or 16 (FP8); a call the library has no kernel for ends the process, as the float multiplies do. `int8MatmulVectorAlpha` throws `std::runtime_error("unsupported")` on HIP. Every backend names its element types `Fp8E4M3Type` and `Bf16Type`.
 
 ## GEMM call instantiation and the algorithm cache
 
@@ -122,7 +129,7 @@ The CUDA backend (`BlasCuda`, over cuBLASLt) and the HIP backend (`BlasHip`, ove
 | `Epilogue::Default` | `matmul` (no bias) |
 | `Epilogue::Bias` | `gemm` (adds the bias vector) |
 | `Epilogue::ReluBias` | `gemmrelu` (bias, then ReLU) |
-| `Epilogue::GeluBias` | `gemmgelu` (bias, then GELU) |
+| `Epilogue::GeluBias` | `gemmgelu` (bias, then the tanh-approximation GELU) |
 
 ### Initializing the cache limit
 
