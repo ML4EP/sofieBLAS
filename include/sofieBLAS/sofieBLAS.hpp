@@ -22,7 +22,7 @@
 #endif
 
 #if defined(ALPAKA_ACC_GPU_CUDA_ENABLED)
-#include "sofieBLAS/backends/cuda/sofieBLAS_cublas.hpp"
+#include "sofieBLAS/backends/cuda/sofieBLAS_cublaslt.hpp"
 #endif
 
 #if defined(ALPAKA_ACC_GPU_HIP_ENABLED)

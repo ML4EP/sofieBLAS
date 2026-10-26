@@ -1,148 +1,47 @@
-// Shared implementation of the cuBLASLt and hipBLASLt backends. The two
-// vendor APIs have the same shape under different names, so the backend is
-// written once against an Api table. A vendor header defines that table
-// (the types, constants and functions of its library), defines the check
-// macros SOFIEBLAS_CHECK_LT and SOFIEBLAS_CHECK_RT, includes the vendor and
-// standard headers and then includes this file.
+// The public API of the cuBLASLt and hipBLASLt backends, written once against
+// an Api table. A vendor header defines that table (the types, constants and
+// functions of its library) and the check macros SOFIEBLAS_CHECK_LT and
+// SOFIEBLAS_CHECK_RT, then includes this file.
 
-struct PairHash {
-  std::size_t
-  operator()(const std::pair<std::size_t, std::size_t> &p) const noexcept {
-    std::size_t h1 = std::hash<std::size_t>{}(p.first);
-    std::size_t h2 = std::hash<std::size_t>{}(p.second);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
-  }
-};
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_utils.hpp"
 
-struct LayoutKey {
-  int type;
-  std::size_t rows, cols;
-  bool operator==(const LayoutKey &o) const noexcept {
-    return type == o.type && rows == o.rows && cols == o.cols;
-  }
-};
-
-struct LayoutKeyHash {
-  std::size_t operator()(const LayoutKey &k) const noexcept {
-    std::size_t h = PairHash{}({k.rows, k.cols});
-    return h ^ (std::hash<int>{}(k.type) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-                (h >> 2));
-  }
-};
-
-struct LdKey {
-  int type;
-  std::size_t rows, cols, ld;
-  bool operator==(const LdKey &o) const noexcept {
-    return type == o.type && rows == o.rows && cols == o.cols && ld == o.ld;
-  }
-};
-
-struct LdKeyHash {
-  std::size_t operator()(const LdKey &k) const noexcept {
-    std::size_t h =
-        PairHash{}({k.rows, k.cols}) ^ (std::hash<std::size_t>{}(k.ld) * 31u);
-    return h ^ (std::hash<int>{}(k.type) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-                (h >> 2));
-  }
-};
-
-struct DescKey {
-  int transA; // backend transpose enum encoded as int
-  int transB;
-  int epilogue; // backend epilogue enum encoded as int
-  int typeD;    // backend data-type enum of the output D
-  bool operator==(const DescKey &o) const noexcept {
-    return transA == o.transA && transB == o.transB && epilogue == o.epilogue &&
-           typeD == o.typeD;
-  }
-};
-
-struct DescKeyHash {
-  std::size_t operator()(const DescKey &k) const noexcept {
-    std::size_t h = static_cast<std::size_t>(k.transA) * 97u +
-                    static_cast<std::size_t>(k.transB) * 31u +
-                    static_cast<std::size_t>(k.epilogue);
-    h = h * 31u + static_cast<std::size_t>(k.typeD);
-    return h ^ (h >> 16);
-  }
-};
-
-struct AlgoKey {
-  DescKey dk;
-  std::size_t rowsA, colsA; // physical dimensions of A in layoutStore
-  std::size_t rowsB, colsB; // physical dimensions of B in layoutStore
-  std::size_t ldA = 0, ldB = 0; // leading dimensions of A and B, 0 when dense
-  bool operator==(const AlgoKey &o) const noexcept {
-    return dk == o.dk && rowsA == o.rowsA && colsA == o.colsA &&
-           rowsB == o.rowsB && colsB == o.colsB && ldA == o.ldA &&
-           ldB == o.ldB;
-  }
-};
-
-struct AlgoKeyHash {
-  std::size_t operator()(const AlgoKey &k) const noexcept {
-    std::size_t h = DescKeyHash{}(k.dk);
-    auto mix = [&](std::size_t v) {
-      h ^= std::hash<std::size_t>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) +
-           (h >> 2);
-    };
-    mix(k.rowsA);
-    mix(k.colsA);
-    mix(k.rowsB);
-    mix(k.colsB);
-    mix(k.ldA);
-    mix(k.ldB);
-    return h;
-  }
-};
-
-template <class Api> class BlasLt {
-  typename Api::Handle ltHandle = nullptr;
-  typename Api::BlasHandle handle = nullptr;
-  typename Api::Preference preference = nullptr;
-  void *d_workspace = nullptr;
-  size_t workspaceSize = 1u << 25; // 32 MB
-  typename Api::Stream stream = nullptr;
-
-  std::unordered_map<LayoutKey, typename Api::Layout, LayoutKeyHash>
-      layoutStore;
-
-  // layouts of the operands with a leading dimension larger than the number of
-  // rows (padded or sub-matrix views); the dense ones are in layoutStore
-  std::unordered_map<LdKey, typename Api::Layout, LdKeyHash> ldLayoutStore;
-
-  // One cache entry per exact GEMM configuration: the heuristic result to
-  // reuse, plus this entry's position in the recency list so a hit can mark
-  // itself most-recently-used in O(1). The position is only maintained when a
-  // cache limit is set; with no limit the list stays empty.
-  struct CacheEntry {
-    typename Api::HeuristicResult h{};
-    std::list<AlgoKey>::iterator lru{};
-  };
-
-  // The descriptors and algorithms of one group of input types. Each group
-  // has its own set, so two groups never share a descriptor (or what is set on
-  // it per call) or an algorithm. Inside a group the output type decides every
-  // other type, so it is the only type in the keys. Layouts are shared by all
-  // groups: their key holds the element type and nothing is set on them per
-  // call.
-  struct GemmCaches {
-    std::unordered_map<DescKey, typename Api::MatmulDesc, DescKeyHash>
-        descStore;
-    std::unordered_map<AlgoKey, CacheEntry, AlgoKeyHash> algoCache;
-    // entries ordered most- to least-recently used; drives eviction
-    std::list<AlgoKey> lruOrder;
-  };
-  GemmCaches floatCaches, fp16Caches, int8Caches, fp8Caches;
-  // 0 = unbounded; the limit applies to each group
-  std::size_t algoCacheLimit = 0;
+template <class Api> class BlasLt : private BlasLtBase<Api> {
+  using Base = BlasLtBase<Api>;
+  using typename Base::BatchKey;
+  using typename Base::BatchedEntry;
+  using Base::batchedStore;
+  using Base::charToTranspose;
+  using Base::createBatchedLayout;
+  using Base::d_workspace;
+  using Base::executeFp8;
+  using Base::executeMatmul;
+  using Base::executeQuantBatched;
+  using Base::floatCaches;
+  using Base::fp16Caches;
+  using Base::fp8Caches;
+  using Base::getOrComputeAlgo;
+  using Base::getOrCreateDesc;
+  using Base::getOrCreateLayout;
+  using Base::handle;
+  using Base::int8Caches;
+  using Base::layoutKeyA;
+  using Base::layoutKeyB;
+  using Base::ltHandle;
+  using Base::preference;
+  using Base::stream;
+  using Base::toApiEpilogue;
+  using Base::usesBias;
+  using Base::workspaceSize;
 
 public:
   // the bf16 and fp8 element types of this backend, for the fp8 GEMMs
   using Bf16 = typename Api::Bf16;
   using Fp8E4M3 = typename Api::Fp8E4M3;
   using Fp8E5M2 = typename Api::Fp8E5M2;
+
+  // the same types under the names shared with the CPU backend
+  using Fp8E4M3Type = typename Api::Fp8E4M3;
+  using Bf16Type = typename Api::Bf16;
 
   std::size_t algoCacheSize() const {
     return floatCaches.algoCache.size() + fp16Caches.algoCache.size() +
@@ -155,63 +54,7 @@ public:
   BlasLt &operator=(BlasLt &&) = delete;
 
   BlasLt(typename Api::Queue &queue, std::size_t cacheLimit = 0)
-      : algoCacheLimit{cacheLimit}, m_queue{queue} {
-    stream = static_cast<typename Api::Stream>(m_queue.getNativeHandle());
-
-    SOFIEBLAS_CHECK_LT(Api::ltCreate(&ltHandle));
-
-    SOFIEBLAS_CHECK_LT(Api::blasCreate(&handle));
-    SOFIEBLAS_CHECK_LT(Api::blasSetStream(handle, stream));
-
-    SOFIEBLAS_CHECK_LT(Api::prefCreate(&preference));
-    SOFIEBLAS_CHECK_RT(Api::rtMalloc(&d_workspace, workspaceSize));
-    SOFIEBLAS_CHECK_LT(Api::prefSetAttribute(preference, Api::PrefMaxWorkspace,
-                                             &workspaceSize,
-                                             sizeof(workspaceSize)));
-  }
-
-  ~BlasLt() {
-    for (auto &[key, layout] : layoutStore)
-      if (layout)
-        Api::layoutDestroy(layout);
-    for (auto &[key, layout] : ldLayoutStore)
-      if (layout)
-        Api::layoutDestroy(layout);
-    for (auto &[key, entry] : batchedStore) {
-      Api::layoutDestroy(entry.lA);
-      Api::layoutDestroy(entry.lB);
-      Api::layoutDestroy(entry.lC);
-    }
-    for (auto *caches : {&floatCaches, &fp16Caches, &int8Caches, &fp8Caches})
-      for (auto &[key, desc] : caches->descStore)
-        if (desc)
-          Api::descDestroy(desc);
-    if (preference)
-      Api::prefDestroy(preference);
-    if (ltHandle)
-      Api::ltDestroy(ltHandle);
-    if (handle)
-      Api::blasDestroy(handle);
-    if (d_workspace)
-      Api::rtFree(d_workspace);
-  }
-
-  inline typename Api::Operation charToTranspose(char trans) {
-    switch (trans) {
-    case 'N':
-    case 'n':
-      return Api::OpN;
-    case 'T':
-    case 't':
-      return Api::OpT;
-    case 'C':
-    case 'c':
-      return Api::OpC;
-    default:
-      throw std::invalid_argument(
-          std::string("Invalid transpose character for ") + Api::name + ".");
-    }
-  }
+      : Base(queue, cacheLimit) {}
 
   // Registers a call site's construction-time shape: creates the three matrix
   // layouts and resolves the multiply algorithm for them up front, so the
@@ -303,7 +146,9 @@ public:
                   layoutKeyB(transb, k, n), {m, n});
   }
 
-  template <typename TA, typename TB, typename TC>
+  // Views only: raw pointers of mixed constness go to the pointer overload.
+  template <typename TA, typename TB, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, TA const &A, TB const &B,
                      float beta, TC &C) {
@@ -404,7 +249,9 @@ public:
              static_cast<float *>(alpaka::getPtrNative(C)));
   }
 
-  template <typename TA, typename TB, typename TC>
+  // Views only: raw pointers of mixed constness go to the pointer overload.
+  template <typename TA, typename TB, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, TA const &A, unsigned int lda,
                      TB const &B, unsigned int ldb, float beta, TC &C) {
@@ -431,7 +278,7 @@ public:
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
     const auto epi = toApiEpilogue(epilogue);
-    if constexpr (!Api::SupportsBiasBatchStride) {
+    if constexpr (!(requires { Api::DescBiasBatchStride; })) {
       if (usesBias(epi) && strideBias != 0 && batchCount > 1) {
         for (int b = 0; b < batchCount; ++b)
           gemmStridedBatched(transa, transb, m, n, k, alpha, A + b * strideA,
@@ -484,7 +331,7 @@ public:
     if (usesBias(epi)) {
       SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
                                                &bias, sizeof(bias)));
-      if constexpr (Api::SupportsBiasBatchStride) {
+      if constexpr (requires { Api::DescBiasBatchStride; }) {
         std::int64_t biasStride = strideBias;
         SOFIEBLAS_CHECK_LT(Api::descSetAttribute(
             desc, Api::DescBiasBatchStride, &biasStride, sizeof(biasStride)));
@@ -560,20 +407,106 @@ public:
                   Api::RealI8, Api::RealF32);
   }
 
-  // Checks whether the library has a kernel for the int8-output int8Matmul
-  // above (int8 A, B and C, float alpha and bias) with these transposes,
-  // sizes and epilogue. Returns false instead of ending the process when it
-  // has none, so the caller can take another path, such as the int32-output
-  // int8Matmul.
-  inline bool int8MatmulSupported(char transa, char transb, unsigned int m,
-                                  unsigned int n, unsigned int k,
-                                  Epilogue epilogue) {
-    return getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                            toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
-                            layoutKeyB(transb, k, n), {m, n}, 0, 0,
-                            Api::ComputeI32, Api::RealF32, Api::RealI8,
-                            Api::RealI8, Api::RealF32,
-                            /*exitOnNoAlgorithm=*/false) != nullptr;
+  // int8 GEMM with one alpha per row of C: C[i, j] = epilogue(alphaVector[i]
+  // * sum_p op(A)[i, p] * op(B)[p, j] + bias[i]), rounded and saturated to
+  // int8 as in the int8-output int8Matmul. alphaVector is a device vector of m
+  // floats, beta is zero; bias may be null when the epilogue adds none.
+  // cuBLASLt has kernels for it only with A transposed (TN).
+  template <typename TAlpha, typename TA, typename TB, typename TBias,
+            typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulVectorAlpha(char transa, char transb, unsigned int m,
+                                    unsigned int n, unsigned int k,
+                                    TAlpha const &alphaVector, TA const &A,
+                                    TB const &B, TBias &bias, TC &C,
+                                    Epilogue epilogue) {
+    int8MatmulVectorAlpha(transa, transb, m, n, k,
+                          alpaka::getPtrNative(alphaVector),
+                          alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                          alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                          epilogue);
+  }
+
+  inline void int8MatmulVectorAlpha(char transa, char transb, unsigned int m,
+                                    unsigned int n, unsigned int k,
+                                    const float *alphaVector, const int8_t *A,
+                                    const int8_t *B, const float *bias,
+                                    int8_t *C, Epilogue epilogue) {
+    if constexpr (!(requires { Api::PointerModeAlphaDeviceVectorBetaHost; })) {
+      throw std::runtime_error("unsupported");
+    } else {
+      const float beta = 0.f;
+      executeMatmul(charToTranspose(transa), charToTranspose(transb),
+                    toApiEpilogue(epilogue), alphaVector, A, B, &beta, C, C,
+                    bias, layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
+                    {m, n}, 0, 0, Api::ComputeI32, Api::RealF32, Api::RealI8,
+                    Api::RealI8, Api::RealF32, nullptr, nullptr, nullptr,
+                    /*alphaVector=*/true);
+    }
+  }
+
+  // Strided-batched int8 GEMMs: for every batch b in [0, batchCount),
+  // C_b = op(A_b) * op(B_b) with X_b = X + b * strideX (strides in elements,
+  // dense column-major matrices; a stride of 0 shares the matrix between the
+  // batches). The first writes the exact int32 sum; the second scales it by
+  // alpha, adds the bias (one value per row of C, shared by the batches),
+  // applies the epilogue and writes int8 as the int8-output int8Matmul.
+  template <typename TA, typename TB, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, TA const &A,
+                                       long long strideA, TB const &B,
+                                       long long strideB, TC &C,
+                                       long long strideC, int batchCount) {
+    int8MatmulStridedBatched(transa, transb, m, n, k, alpaka::getPtrNative(A),
+                             strideA, alpaka::getPtrNative(B), strideB,
+                             alpaka::getPtrNative(C), strideC, batchCount);
+  }
+
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, const int8_t *A,
+                                       long long strideA, const int8_t *B,
+                                       long long strideB, int32_t *C,
+                                       long long strideC, int batchCount) {
+    const int32_t alpha = 1, beta = 0;
+    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
+                        strideB, &beta, nullptr, C, strideC, batchCount,
+                        Epilogue::Default, Api::ComputeI32, Api::RealI32,
+                        Api::RealI8, Api::RealI32, Api::RealF32);
+  }
+
+  template <typename TA, typename TB, typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, float alpha,
+                                       TA const &A, long long strideA,
+                                       TB const &B, long long strideB,
+                                       TBias &bias, TC &C, long long strideC,
+                                       int batchCount, Epilogue epilogue) {
+    int8MatmulStridedBatched(transa, transb, m, n, k, alpha,
+                             alpaka::getPtrNative(A), strideA,
+                             alpaka::getPtrNative(B), strideB,
+                             alpaka::getPtrNative(bias),
+                             alpaka::getPtrNative(C), strideC, batchCount,
+                             epilogue);
+  }
+
+  inline void int8MatmulStridedBatched(char transa, char transb,
+                                       unsigned int m, unsigned int n,
+                                       unsigned int k, float alpha,
+                                       const int8_t *A, long long strideA,
+                                       const int8_t *B, long long strideB,
+                                       const float *bias, int8_t *C,
+                                       long long strideC, int batchCount,
+                                       Epilogue epilogue) {
+    const float beta = 0.f;
+    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
+                        strideB, &beta, bias, C, strideC, batchCount, epilogue,
+                        Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8,
+                        Api::RealF32);
   }
 
   // fp16 GEMMs: A and B in half precision (__half), summed and scaled in
@@ -634,8 +567,7 @@ public:
   // fp8 GEMMs: A and B in FP8 E4M3, each with its own scale (a device pointer
   // to one float), summed and scaled in float, with beta 0. The bias, for the
   // epilogues that add one, is BF16. The output is float, half, bf16, or FP8
-  // (E4M3 or E5M2) with a scale of its own. cuBLASLt runs fp8 only as TN (A
-  // transposed, B not).
+  // (E4M3 or E5M2) with a scale of its own. 
   template <typename TA, typename TSA, typename TB, typename TSB,
             typename TBias, typename TC>
   inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
@@ -756,320 +688,36 @@ public:
                Api::RealF8E5M2, scaleD, epilogue);
   }
 
-  // Checks whether the library has a kernel for matmulFp8Fp32 with these
-  // transposes, sizes and epilogue. Returns false instead of ending the
-  // process when it has none, for example on a GPU without fp8.
-  inline bool matmulFp8Supported(char transa, char transb, unsigned int m,
-                                 unsigned int n, unsigned int k,
-                                 Epilogue epilogue = Epilogue::Default) {
-    return getOrComputeAlgo(charToTranspose(transa), charToTranspose(transb),
-                            toApiEpilogue(epilogue), layoutKeyA(transa, m, k),
-                            layoutKeyB(transb, k, n), {m, n}, 0, 0,
-                            Api::ComputeF32, Api::RealF32, Api::RealF8E4M3,
-                            Api::RealF32, Api::RealBF16,
-                            /*exitOnNoAlgorithm=*/false) != nullptr;
+  // Strided-batched matmulFp8Fp32: for every batch b, C_b = epilogue(alpha *
+  // scaleA * scaleB * op(A_b) * op(B_b) + bias) with X_b = X + b * strideX
+  // (strides in elements, dense matrices, 0 shares the matrix). The scales and
+  // the BF16 bias (one value per row of C) are shared by the batches.
+  template <typename TA, typename TSA, typename TB, typename TSB,
+            typename TBias, typename TC,
+            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+  inline void matmulFp8Fp32StridedBatched(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha, TA const &A, TSA const &scaleA, long long strideA,
+      TB const &B, TSB const &scaleB, long long strideB, TBias &bias, TC &C,
+      long long strideC, int batchCount,
+      Epilogue epilogue = Epilogue::Default) {
+    matmulFp8Fp32StridedBatched(
+        transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
+        alpaka::getPtrNative(scaleA), strideA, alpaka::getPtrNative(B),
+        alpaka::getPtrNative(scaleB), strideB, alpaka::getPtrNative(bias),
+        alpaka::getPtrNative(C), strideC, batchCount, epilogue);
   }
 
-private:
-  typename Api::Queue m_queue;
-
-  static typename Api::Epilogue toApiEpilogue(Epilogue epilogue) {
-    switch (epilogue) {
-    case Epilogue::Bias:
-      return Api::EpilogueBias;
-    case Epilogue::ReluBias:
-      return Api::EpilogueReluBias;
-    case Epilogue::GeluBias:
-      return Api::EpilogueGeluBias;
-    case Epilogue::Relu:
-      return Api::EpilogueRelu;
-    case Epilogue::Default:
-      break;
-    }
-    return Api::EpilogueDefault;
-  }
-
-  // true for the epilogues that add a bias vector
-  static bool usesBias(typename Api::Epilogue epilogue) {
-    return epilogue != Api::EpilogueDefault && epilogue != Api::EpilogueRelu;
-  }
-
-  // the cache set of the group a GEMM belongs to, chosen by the type of A and B
-  GemmCaches &cachesFor(decltype(Api::RealF32) typeAB) {
-    if (typeAB == Api::RealF32)
-      return floatCaches;
-    if (typeAB == Api::RealF16)
-      return fp16Caches;
-    if (typeAB == Api::RealI8)
-      return int8Caches;
-    if (typeAB == Api::RealF8E4M3)
-      return fp8Caches;
-    throw std::invalid_argument("sofieBLAS: no cache set for this input type");
-  }
-
-  static bool isFp8(decltype(Api::RealF32) type) {
-    return type == Api::RealF8E4M3 || type == Api::RealF8E5M2;
-  }
-
-  // the type of C: the library needs a 16-bit C when D is FP8 (beta is 0 for
-  // those, so C is never read); otherwise C has D's type
-  static decltype(Api::RealF32) cTypeFor(decltype(Api::RealF32) typeD) {
-    return isFp8(typeD) ? Api::RealBF16 : typeD;
-  }
-
-  // the shared body of the fp8 GEMMs: E4M3 inputs, float sum and scale,
-  // beta 0, BF16 bias, an output of type typeD (scaleD only for an FP8 one)
-  void executeFp8(char transa, char transb, unsigned int m, unsigned int n,
-                  unsigned int k, float alpha, const void *A,
-                  const float *scaleA, const void *B, const float *scaleB,
-                  const void *bias, void *C, decltype(Api::RealF32) typeD,
-                  const float *scaleD, Epilogue epilogue) {
+  inline void matmulFp8Fp32StridedBatched(
+      char transa, char transb, unsigned int m, unsigned int n, unsigned int k,
+      float alpha, const Fp8E4M3 *A, const float *scaleA, long long strideA,
+      const Fp8E4M3 *B, const float *scaleB, long long strideB,
+      const Bf16 *bias, float *C, long long strideC, int batchCount,
+      Epilogue epilogue = Epilogue::Default) {
     const float beta = 0.f;
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  0, 0, Api::ComputeF32, Api::RealF32, Api::RealF8E4M3, typeD,
-                  Api::RealBF16, scaleA, scaleB, scaleD);
-  }
-
-  // the configuration of a batched multiply: transposes, epilogue, m, n, k,
-  // the leading dimensions, the three strides and the batch count
-  using BatchKey = std::array<long long, 13>;
-  struct BatchedEntry {
-    typename Api::Layout lA = nullptr, lB = nullptr, lC = nullptr;
-    typename Api::HeuristicResult h{};
-  };
-  std::map<BatchKey, BatchedEntry> batchedStore;
-
-  typename Api::Layout
-  createBatchedLayout(const std::pair<std::size_t, std::size_t> &shape,
-                      std::size_t ld, long long stride, int batchCount) {
-    typename Api::Layout layout = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, Api::RealF32, shape.first,
-                                         shape.second, ld));
-    std::int32_t count = batchCount;
-    std::int64_t offset = stride;
-    SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(
-        layout, Api::LayoutBatchCount, &count, sizeof(count)));
-    SOFIEBLAS_CHECK_LT(Api::layoutSetAttribute(
-        layout, Api::LayoutStridedBatchOffset, &offset, sizeof(offset)));
-    return layout;
-  }
-
-  static std::pair<std::size_t, std::size_t>
-  layoutKeyA(char trans, std::size_t m, std::size_t k) {
-    return (trans == 'N' || trans == 'n') ? std::make_pair(m, k)
-                                          : std::make_pair(k, m);
-  }
-
-  static std::pair<std::size_t, std::size_t>
-  layoutKeyB(char trans, std::size_t k, std::size_t n) {
-    return (trans == 'N' || trans == 'n') ? std::make_pair(k, n)
-                                          : std::make_pair(n, k);
-  }
-
-  // Returns the layout describing a (rows, cols) matrix of the given element
-  // type with leading dimension ld (column-major), creating and caching it on
-  // first use. The dense layouts (ld = rows) are keyed by the type and shape,
-  // the others also by ld.
-  typename Api::Layout
-  getOrCreateLayout(const std::pair<std::size_t, std::size_t> &shape,
-                    std::size_t ld, decltype(Api::RealF32) type = Api::RealF32) {
-    if (ld < shape.first)
-      throw std::invalid_argument(
-          std::string("sofieBLAS: leading dimension ") + std::to_string(ld) +
-          " is smaller than the number of rows " + std::to_string(shape.first) +
-          " of the matrix.");
-    if (ld == shape.first) {
-      const LayoutKey key{static_cast<int>(type), shape.first, shape.second};
-      auto it = layoutStore.find(key);
-      if (it != layoutStore.end())
-        return it->second;
-      typename Api::Layout layout = nullptr;
-      SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, type, shape.first,
-                                           shape.second, ld));
-      layoutStore.emplace(key, layout);
-      return layout;
-    }
-    LdKey key{static_cast<int>(type), shape.first, shape.second, ld};
-    auto it = ldLayoutStore.find(key);
-    if (it != ldLayoutStore.end())
-      return it->second;
-    typename Api::Layout layout = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::layoutCreate(&layout, type, shape.first,
-                                         shape.second, ld));
-    ldLayoutStore.emplace(key, layout);
-    return layout;
-  }
-
-  typename Api::MatmulDesc &
-  getOrCreateDesc(typename Api::Operation transA, typename Api::Operation transB,
-                  typename Api::Epilogue epilogue,
-                  decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                  decltype(Api::RealF32) scaleType = Api::RealF32,
-                  decltype(Api::RealF32) biasType = Api::RealF32,
-                  decltype(Api::RealF32) typeAB = Api::RealF32,
-                  decltype(Api::RealF32) typeD = Api::RealF32) {
-    auto &descStore = cachesFor(typeAB).descStore;
-    DescKey key{(int)transA, (int)transB, (int)epilogue, (int)typeD};
-    auto it = descStore.find(key);
-    if (it != descStore.end())
-      return it->second;
-
-    typename Api::MatmulDesc desc = nullptr;
-    SOFIEBLAS_CHECK_LT(Api::descCreate(&desc, computeType, scaleType));
-    SOFIEBLAS_CHECK_LT(
-        Api::descSetAttribute(desc, Api::DescTransA, &transA, sizeof(transA)));
-    SOFIEBLAS_CHECK_LT(
-        Api::descSetAttribute(desc, Api::DescTransB, &transB, sizeof(transB)));
-    SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescEpilogue, &epilogue,
-                                             sizeof(epilogue)));
-    // For bias epilogues: set a non-null dummy pointer so the descriptor is
-    // valid for the heuristic query, and the bias type the caller declared.
-    if (usesBias(epilogue)) {
-      const void *dummy = d_workspace;
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
-                                               &dummy, sizeof(dummy)));
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasDataType,
-                                               &biasType, sizeof(biasType)));
-    }
-    // FP8: placeholder scale pointers, so the algorithm search sees a scaled
-    // multiply; the real ones are set on every call
-    if (typeAB == Api::RealF8E4M3) {
-      const void *dummy = d_workspace;
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescAScalePointer,
-                                               &dummy, sizeof(dummy)));
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBScalePointer,
-                                               &dummy, sizeof(dummy)));
-      if (isFp8(typeD))
-        SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescDScalePointer,
-                                                 &dummy, sizeof(dummy)));
-    }
-    descStore.emplace(key, desc);
-    return descStore.at(key);
-  }
-
-  typename Api::HeuristicResult *
-  getOrComputeAlgo(typename Api::Operation transA,
-                   typename Api::Operation transB,
-                   typename Api::Epilogue epilogue,
-                   const std::pair<std::size_t, std::size_t> &shapeA,
-                   const std::pair<std::size_t, std::size_t> &shapeB,
-                   const std::pair<std::size_t, std::size_t> &shapeC,
-                   std::size_t ldA = 0, std::size_t ldB = 0,
-                   decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                   decltype(Api::RealF32) scaleType = Api::RealF32,
-                   decltype(Api::RealF32) typeAB = Api::RealF32,
-                   decltype(Api::RealF32) typeD = Api::RealF32,
-                   decltype(Api::RealF32) biasType = Api::RealF32,
-                   bool exitOnNoAlgorithm = true) {
-    // ldA/ldB are 0 for dense operands
-    if (ldA == shapeA.first)
-      ldA = 0;
-    if (ldB == shapeB.first)
-      ldB = 0;
-    auto &algoCache = cachesFor(typeAB).algoCache;
-    auto &lruOrder = cachesFor(typeAB).lruOrder;
-    AlgoKey key{{(int)transA, (int)transB, (int)epilogue, (int)typeD},
-                shapeA.first,
-                shapeA.second,
-                shapeB.first,
-                shapeB.second,
-                ldA,
-                ldB};
-    auto it = algoCache.find(key);
-    if (it != algoCache.end()) {
-      if (algoCacheLimit)
-        lruOrder.splice(lruOrder.begin(), lruOrder, it->second.lru);
-      return &it->second.h;
-    }
-
-    auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType, typeAB, typeD);
-    auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
-    auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, cTypeFor(typeD));
-    auto lD = cTypeFor(typeD) == typeD
-                  ? lC
-                  : getOrCreateLayout(shapeC, shapeC.first, typeD);
-    typename Api::HeuristicResult h{};
-    int returnedResults = 0;
-    const auto status = Api::getHeuristic(ltHandle, desc, lA, lB, lC, lD,
-                                          preference, 1, &h, &returnedResults);
-    if (!exitOnNoAlgorithm && status == Api::StatusNotSupported)
-      return nullptr;
-    SOFIEBLAS_CHECK_LT(status);
-    if (returnedResults == 0) {
-      if (!exitOnNoAlgorithm)
-        return nullptr;
-      std::cerr << "[sofieBLAS] No suitable " << Api::name
-                << " algorithm found for "
-                << "transA=" << transA << " transB=" << transB
-                << " epilogue=" << epilogue << " A=[" << shapeA.first << "x"
-                << shapeA.second << "]"
-                << " B=[" << shapeB.first << "x" << shapeB.second << "]\n";
-      exit(EXIT_FAILURE);
-    }
-    auto ins = algoCache.emplace(key, CacheEntry{h, {}}).first;
-    if (algoCacheLimit) {
-      lruOrder.push_front(key);
-      ins->second.lru = lruOrder.begin();
-      while (algoCache.size() > algoCacheLimit) {
-        algoCache.erase(lruOrder.back());
-        lruOrder.pop_back();
-      }
-    }
-    return &ins->second.h;
-  }
-
-  void executeMatmul(typename Api::Operation transA,
-                     typename Api::Operation transB,
-                     typename Api::Epilogue epilogue, const void *alpha,
-                     const void *A, const void *B, const void *beta,
-                     const void *D_in, void *C_out, const void *bias_ptr,
-                     const std::pair<std::size_t, std::size_t> &shapeA,
-                     const std::pair<std::size_t, std::size_t> &shapeB,
-                     const std::pair<std::size_t, std::size_t> &shapeC,
-                     std::size_t ldA = 0, std::size_t ldB = 0,
-                     decltype(Api::ComputeF32) computeType = Api::ComputeF32,
-                     decltype(Api::RealF32) scaleType = Api::RealF32,
-                     decltype(Api::RealF32) typeAB = Api::RealF32,
-                     decltype(Api::RealF32) typeD = Api::RealF32,
-                     decltype(Api::RealF32) biasType = Api::RealF32,
-                     const float *scaleA = nullptr,
-                     const float *scaleB = nullptr,
-                     const float *scaleD = nullptr) {
-    // Retrieve (or lazily compute) the cached algorithm for this shape
-    auto *h = getOrComputeAlgo(transA, transB, epilogue, shapeA, shapeB, shapeC,
-                               ldA, ldB, computeType, scaleType, typeAB, typeD,
-                               biasType);
-
-    // Retrieve the cached descriptor and patch the real bias pointer in-place
-    auto &desc = getOrCreateDesc(transA, transB, epilogue, computeType,
-                                 scaleType, biasType, typeAB, typeD);
-    if (bias_ptr && usesBias(epilogue)) {
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
-                                               &bias_ptr, sizeof(bias_ptr)));
-    }
-    // FP8: the scale pointers, set on every call like the bias pointer
-    if (scaleA)
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescAScalePointer,
-                                               &scaleA, sizeof(scaleA)));
-    if (scaleB)
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBScalePointer,
-                                               &scaleB, sizeof(scaleB)));
-    if (scaleD)
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescDScalePointer,
-                                               &scaleD, sizeof(scaleD)));
-
-    auto lA = getOrCreateLayout(shapeA, ldA ? ldA : shapeA.first, typeAB);
-    auto lB = getOrCreateLayout(shapeB, ldB ? ldB : shapeB.first, typeAB);
-    auto lC = getOrCreateLayout(shapeC, shapeC.first, cTypeFor(typeD));
-    auto lD = cTypeFor(typeD) == typeD
-                  ? lC
-                  : getOrCreateLayout(shapeC, shapeC.first, typeD);
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, alpha, A, lA, B, lB, beta,
-                                   D_in, lC, C_out, lD, &h->algo, d_workspace,
-                                   workspaceSize, stream));
+    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
+                        strideB, &beta, bias, C, strideC, batchCount, epilogue,
+                        Api::ComputeF32, Api::RealF32, Api::RealF8E4M3,
+                        Api::RealF32, Api::RealBF16, scaleA, scaleB);
   }
 };
