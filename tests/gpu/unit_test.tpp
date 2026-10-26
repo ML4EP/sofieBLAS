@@ -345,9 +345,7 @@ template <typename TTag> static void runGpuTests() {
       auto hBC = alpaka::allocBuf<float, Idx>(hostDev, static_cast<Idx>(M * N * BATCH));
       alpaka::memcpy(queue, hBC, dBC);
       alpaka::wait(queue);
-      // the GELU epilogue of cuBLASLt/hipBLASLt is the tanh approximation of
-      // the erf-based reference, which differs by up to ~1e-3
-      const float atol = c.epilogue == Epilogue::GeluBias ? 2e-3f : 1e-4f;
+      const float atol = 1e-4f;
       checkClose(alpaka::getPtrNative(hBC), refB.data(), M * N * BATCH,
                  std::string("gemmStridedBatched epilogue: ") + c.name, 1e-4f,
                  atol);
@@ -587,9 +585,9 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
       std::vector<float> ref = C0; // beta reads C
       refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, c.alpha,
                   c.beta, c.transA == 'T', c.transB == 'T', c.epilogue);
-      // the GELU epilogue on the GPU is the tanh approximation of the
-      // erf-based reference; everything else is exact
-      const float tol = c.epilogue == Epilogue::GeluBias ? 2e-3f : 0.f;
+      // the GELU epilogue (tanh approximation) is not bit-exact; everything
+      // else is
+      const float tol = c.epilogue == Epilogue::GeluBias ? 1e-4f : 0.f;
 
       auto dCF = upload(C0);
       blas.matmulFp16Fp32(c.transA, c.transB, M, N, K, c.alpha, dA, dB, c.beta,
@@ -699,16 +697,8 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
     for (Case c :
          {Case{'N', 'N', 1.f / 3.f, Epilogue::Default, false, "NN"},
           Case{'T', 'N', 1.f / 3.f, Epilogue::Default, true, "TN raw pointers"},
-          Case{'N', 'N', 1.f / 3.f, Epilogue::ReluBias, false, "relu bias"},
-          Case{'N', 'N', 1.f / 3.f, Epilogue::Relu, false, "relu"},
           Case{'N', 'N', 3.f, Epilogue::Default, false, "saturated"}}) {
       const std::string name = std::string("int8Matmul int8 out ") + c.name;
-      // the library may have no kernel for a combination; that is reported,
-      // not failed
-      if (!blas.int8MatmulSupported(c.transA, c.transB, M, N, K, c.epilogue)) {
-        std::cout << "  SKIP  " << name << " (no kernel)\n";
-        continue;
-      }
       std::vector<int8_t> ref(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
                      c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue);
@@ -728,3 +718,229 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
   }
 }
 
+// int8-output with a per-row alpha, strided-batched int8 and fp8 GEMMs. The
+// int8 outputs are compared exactly with the same host reference as the CPU
+// tests, so the two backends agree bit for bit on these inputs.
+template <typename TTag> static void runGpuQuantizedTests() {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+
+  using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
+  using DevAcc = alpaka::Dev<Acc>;
+  using PlatformAcc = alpaka::Platform<Acc>;
+  using Blas = sofieBLAS<TTag>;
+  using Fp8 = typename Blas::Fp8E4M3Type;
+  using Bf16 = typename Blas::Bf16Type;
+  static_assert(sizeof(Fp8) == 1 && sizeof(Bf16) == 2);
+
+  PlatformAcc platform{};
+  auto dev = alpaka::getDevByIdx(platform, 0u);
+  alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
+  Blas blas(queue);
+
+  alpaka::PlatformCpu hostPlatform{};
+  auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
+
+  auto upload = [&](const auto &v) {
+    using T = typename std::decay_t<decltype(v)>::value_type;
+    auto h = alpaka::allocBuf<T, Idx>(hostDev, static_cast<Idx>(v.size()));
+    std::copy(v.begin(), v.end(), alpaka::getPtrNative(h));
+    auto d = alpaka::allocAsyncBuf<T, Idx>(queue, static_cast<Idx>(v.size()));
+    alpaka::memcpy(queue, d, h);
+    alpaka::wait(queue);
+    return d;
+  };
+  auto download = [&](auto &d, int n) {
+    using T = std::remove_pointer_t<decltype(alpaka::getPtrNative(d))>;
+    auto h = alpaka::allocBuf<T, Idx>(hostDev, static_cast<Idx>(n));
+    alpaka::memcpy(queue, h, d);
+    alpaka::wait(queue);
+    return std::vector<T>(alpaka::getPtrNative(h), alpaka::getPtrNative(h) + n);
+  };
+  auto skip = [](const std::string &name) {
+    std::cout << "  SKIP  " << name << " (no kernel)\n";
+  };
+
+  constexpr int M = 32, N = 16, K = 32, BATCH = 3;
+
+  // ---- int8 output with ties, int8 output with a per-row alpha ----
+  {
+    std::vector<int8_t> A(M * K), B(K * N);
+    fillI8Pattern(A, B);
+    std::vector<float> bias(M), alphaVec(M);
+    fillSeq(bias.data(), M, -6.f, 0.5f);
+    for (int i = 0; i < M; ++i)
+      alphaVec[i] = (i % 3 == 0) ? 0.5f : 0.0625f * static_cast<float>(i + 1);
+    auto dA = upload(A);
+    auto dB = upload(B);
+    auto dBias = upload(bias);
+    auto dAlpha = upload(alphaVec);
+    auto dC = alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(M * N));
+
+    for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
+                         Epilogue::Relu}) {
+      const std::string tag =
+          " TN epilogue " + std::to_string(static_cast<int>(epi));
+      std::vector<int8_t> ref(M * N);
+
+      const std::string nameS = "int8Matmul int8 out alpha=0.5 (ties)" + tag;
+      refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
+                     0.5f, true, false, epi);
+      blas.int8Matmul('T', 'N', M, N, K, 0.5f, alpaka::getPtrNative(dA),
+                      alpaka::getPtrNative(dB), alpaka::getPtrNative(dBias),
+                      alpaka::getPtrNative(dC), epi);
+      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameS);
+
+      const std::string nameV = "int8MatmulVectorAlpha" + tag;
+      try {
+        refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
+                       0.f, true, false, epi, alphaVec.data());
+        blas.int8MatmulVectorAlpha('T', 'N', M, N, K, dAlpha, dA, dB, dBias, dC,
+                                   epi);
+        checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV);
+        blas.int8MatmulVectorAlpha(
+            'T', 'N', M, N, K, alpaka::getPtrNative(dAlpha),
+            alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
+            epi == Epilogue::Default || epi == Epilogue::Relu
+                ? nullptr
+                : alpaka::getPtrNative(dBias),
+            alpaka::getPtrNative(dC), epi);
+        checkEqualI8(download(dC, M * N).data(), ref.data(), M * N,
+                     nameV + " raw");
+      } catch (const std::runtime_error &e) {
+        // hipBLASLt has no per-row alpha
+        if (std::string(e.what()) != "unsupported")
+          throw;
+        skip(nameV);
+      }
+    }
+  }
+
+  // ---- strided-batched int8, int32 and int8 output ----
+  for (bool sharedA : {true, false}) {
+    const long long strideA = sharedA ? 0 : M * K;
+    const long long strideB = sharedA ? K * N : 0;
+    std::vector<int8_t> A(M * K * (sharedA ? 1 : BATCH)),
+        B(K * N * (sharedA ? BATCH : 1));
+    fillI8Pattern(A, B);
+    std::vector<float> bias(M);
+    fillSeq(bias.data(), M, -6.f, 0.5f);
+    auto dA = upload(A);
+    auto dB = upload(B);
+    auto dBias = upload(bias);
+    auto dC32 =
+        alpaka::allocAsyncBuf<int32_t, Idx>(queue, static_cast<Idx>(M * N * BATCH));
+    auto dC8 =
+        alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(M * N * BATCH));
+    const std::string tag = sharedA ? " A shared" : " B shared";
+
+    std::vector<int32_t> ref32(M * N * BATCH);
+    for (int b = 0; b < BATCH; ++b)
+      refMatmulI8(ref32.data() + b * M * N, A.data() + b * strideA,
+                  B.data() + b * strideB, M, N, K, true, false);
+    const std::string name32 = "int8MatmulStridedBatched int32" + tag;
+    blas.int8MatmulStridedBatched('T', 'N', M, N, K, dA, strideA, dB, strideB,
+                                  dC32, M * N, BATCH);
+    checkEqual(download(dC32, M * N * BATCH).data(), ref32.data(),
+               M * N * BATCH, name32);
+
+    for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
+                         Epilogue::Relu}) {
+      std::vector<int8_t> ref8(M * N * BATCH);
+      for (int b = 0; b < BATCH; ++b)
+        refMatmulI8Out(ref8.data() + b * M * N, A.data() + b * strideA,
+                       B.data() + b * strideB, bias.data(), M, N, K, 0.5f,
+                       true, false, epi);
+      const std::string name8 = "int8MatmulStridedBatched int8 epilogue " +
+                                std::to_string(static_cast<int>(epi)) + tag;
+      blas.int8MatmulStridedBatched(
+          'T', 'N', M, N, K, 0.5f, alpaka::getPtrNative(dA), strideA,
+          alpaka::getPtrNative(dB), strideB, alpaka::getPtrNative(dBias),
+          alpaka::getPtrNative(dC8), M * N, BATCH, epi);
+      checkEqualI8(download(dC8, M * N * BATCH).data(), ref8.data(),
+                   M * N * BATCH, name8);
+    }
+  }
+
+  // ---- fp8: float and E4M3 output, strided-batched ----
+  {
+    const float alpha = 0.5f;
+    const std::vector<float> scales{0.25f, 2.f, 4.f}; // A, B, D
+    auto bytesA = fp8Pattern(M * K * BATCH, 7u);
+    auto bytesB = fp8Pattern(K * N * BATCH, 11u);
+    std::vector<Fp8> A(bytesA.size()), B(bytesB.size());
+    std::memcpy(static_cast<void *>(A.data()), bytesA.data(), bytesA.size());
+    std::memcpy(static_cast<void *>(B.data()), bytesB.data(), bytesB.size());
+    std::vector<float> bias(M);
+    fillSeq(bias.data(), M, -4.f, 0.5f);
+    std::vector<Bf16> biasBf16(M);
+    for (int i = 0; i < M; ++i) {
+      const uint16_t bits = bf16Bits(bias[i]);
+      std::memcpy(static_cast<void *>(&biasBf16[i]), &bits, sizeof(bits));
+    }
+    auto dA = upload(A);
+    auto dB = upload(B);
+    auto dBias = upload(biasBf16);
+    auto dScales = upload(scales);
+    const float *sA = alpaka::getPtrNative(dScales);
+    const float *sB = sA + 1, *sD = sA + 2;
+    auto dCF =
+        alpaka::allocAsyncBuf<float, Idx>(queue, static_cast<Idx>(M * N * BATCH));
+    auto dC8 = alpaka::allocAsyncBuf<Fp8, Idx>(queue, static_cast<Idx>(M * N));
+
+    for (Epilogue epi :
+         {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias}) {
+      const std::string tag =
+          " TN epilogue " + std::to_string(static_cast<int>(epi));
+      auto ref = refFp8Gemm(bytesA.data(), bytesB.data(), bias.data(), M, N, K,
+                            alpha, scales[0], scales[1], true, false, epi);
+      blas.matmulFp8Fp32('T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA,
+                         alpaka::getPtrNative(dB), sB,
+                         alpaka::getPtrNative(dBias), alpaka::getPtrNative(dCF),
+                         epi);
+      // the download copies the whole (batch-sized) buffer
+      checkClose(download(dCF, M * N * BATCH).data(), ref.data(), M * N,
+                 "matmulFp8Fp32" + tag, 1e-5f, 1e-4f);
+
+      // E4M3 output: scaleD * result, rounded, within half a step
+      blas.matmulFp8Fp8('T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA,
+                        alpaka::getPtrNative(dB), sB,
+                        alpaka::getPtrNative(dBias), alpaka::getPtrNative(dC8),
+                        sD, epi);
+      const auto got8 = download(dC8, M * N);
+      std::vector<float> dec(M * N), want(M * N);
+      for (int i = 0; i < M * N; ++i) {
+        uint8_t bits;
+        std::memcpy(&bits, static_cast<const void *>(&got8[i]), 1);
+        dec[i] = refFp8ToFloat(bits);
+        want[i] = std::max(-448.f, std::min(448.f, scales[2] * ref[i]));
+      }
+      checkClose(dec.data(), want.data(), M * N, "matmulFp8Fp8" + tag,
+                 1.f / 16.f, std::ldexp(1.f, -10));
+    }
+
+    // strided-batched, A shared and B per batch, then the reverse
+    for (bool sharedA : {true, false})
+      for (Epilogue epi : {Epilogue::Default, Epilogue::ReluBias}) {
+        const long long strideA = sharedA ? 0 : M * K;
+        const long long strideB = sharedA ? K * N : 0;
+        const std::string name =
+            std::string("matmulFp8Fp32StridedBatched") +
+            (sharedA ? " A shared" : " B shared") + " epilogue " +
+            std::to_string(static_cast<int>(epi));
+        std::vector<float> want(M * N * BATCH);
+        for (int b = 0; b < BATCH; ++b) {
+          auto ref = refFp8Gemm(bytesA.data() + b * strideA,
+                                bytesB.data() + b * strideB, bias.data(), M, N,
+                                K, alpha, scales[0], scales[1], true, false,
+                                epi);
+          std::copy(ref.begin(), ref.end(), want.begin() + b * M * N);
+        }
+        blas.matmulFp8Fp32StridedBatched(
+            'T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA, strideA,
+            alpaka::getPtrNative(dB), sB, strideB, alpaka::getPtrNative(dBias),
+            alpaka::getPtrNative(dCF), M * N, BATCH, epi);
+        checkClose(download(dCF, M * N * BATCH).data(), want.data(),
+                   M * N * BATCH, name, 1e-5f, 1e-4f);
+      }
+  }
+}

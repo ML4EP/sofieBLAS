@@ -2,6 +2,7 @@
 
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
 
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -11,16 +12,17 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
-#include <hipblas/hipblas.h>
-#include <hipblaslt/hipblaslt.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_fp8.h>
+#include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt.h>
 
 #define CHECK_HIP(err)                                                         \
   if ((err) != hipSuccess) {                                                   \
@@ -70,17 +72,24 @@ struct HipblasLtApi {
   static constexpr auto RealBF16 = HIP_R_16BF;
   static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3;
   static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2;
-  static constexpr auto RealI8  = HIP_R_8I;
+  static constexpr auto RealI8 = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
   static constexpr auto DescBiasDataType = HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
-  static constexpr auto DescAScalePointer = HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
-  static constexpr auto DescBScalePointer = HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
-  static constexpr auto DescDScalePointer = HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
-  static constexpr bool SupportsBiasBatchStride = false;
+  static constexpr auto DescAScalePointer =
+      HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePointer =
+      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePointer =
+      HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  // The per-row alpha vector pointer mode and the bias batch stride of
+  // cuBLASLt (PointerModeAlphaDeviceVectorBetaHost, DescBiasBatchStride) are
+  // not mapped for hipBLASLt. The shared code checks whether the table has
+  // them: int8MatmulVectorAlpha throws "unsupported" here, and a batched
+  // bias with its own stride is issued one batch at a time.
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
       HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
@@ -117,8 +126,6 @@ struct HipblasLtApi {
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
 #define SOFIEBLAS_CHECK_RT(err) CHECK_HIP(err)
-
-#include "../gpu/detail/sofieBLAS_blaslt_common.tpp"
 
 using BlasHip = BlasLt<HipblasLtApi>;
 

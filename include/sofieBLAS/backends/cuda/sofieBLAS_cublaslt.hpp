@@ -11,6 +11,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -80,7 +81,12 @@ struct CublasLtApi {
   static constexpr auto DescAScalePointer = CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
   static constexpr auto DescBScalePointer = CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
   static constexpr auto DescDScalePointer = CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
-  static constexpr bool SupportsBiasBatchStride = true;
+  static constexpr auto DescPointerMode = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PointerModeAlphaDeviceVectorBetaZero =
+      CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_ZERO;
+  static constexpr auto PointerModeAlphaDeviceVectorBetaHost =
+      CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
+  // a device vector of alpha values, one per row of D
   static constexpr auto DescBiasBatchStride =
       CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
   static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
@@ -119,7 +125,7 @@ struct CublasLtApi {
 #define SOFIEBLAS_CHECK_LT(status) CHECK_CUBLAS(status)
 #define SOFIEBLAS_CHECK_RT(err) CHECK_CUDA(err)
 
-#include "../gpu/detail/sofieBLAS_blaslt_common.tpp"
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 
 using BlasCuda = BlasLt<CublasLtApi>;
 
