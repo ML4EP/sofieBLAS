@@ -48,6 +48,10 @@ ctest --test-dir build --output-on-failure
 ./build/benchmark/bench_cuda -w 5 -n 20 --sizes 256,512,1024,2048,4096
 ```
 
+The GPU targets follow `SOFIEBLAS_ENABLE_CUDA` / `SOFIEBLAS_ENABLE_HIP` (`AUTO`, the default, `ON` or `OFF`). `AUTO` builds a GPU backend only when its compiler is installed **and** a GPU of that vendor is present. The architectures then default to the detected GPU: the `gfx` targets reported by `rocm_agent_enumerator` for HIP, `native` for CUDA. `ON` builds a backend without its GPU (for example a compile-only CI job), with portable defaults (`all-major` for CUDA, `gfx1100` for HIP); `-DCMAKE_CUDA_ARCHITECTURES=...` / `-DCMAKE_HIP_ARCHITECTURES=...` always override the detected ones.
+
+The CPU targets use the first CPU BLAS library found, starting with `CPU_BLAS_LIB`. When none is installed, OpenBLAS (`SOFIEBLAS_OPENBLAS_GIT_TAG`, `v0.3.28` by default; BLAS only, no LAPACK or Fortran) is downloaded and built from source into the build directory, the way alpaka is fetched; `-DSOFIEBLAS_FETCH_OPENBLAS=OFF` turns that off, and the CPU targets are then skipped.
+
 `CPU_BLAS_LIB` (`OpenBLAS`/`MKL`/`BLIS`/`Accelerate`) and `CUDA_BASE`/`ROCM_BASE`/`ONEAPI_BASE`/`BLIS_BASE` are available as `-D` cache variables to point at non-default install locations; alpaka is picked up via `find_package(alpaka)` if already installed, otherwise fetched automatically. See `tests/CMakeLists.txt` and `benchmark/CMakeLists.txt` for the target definitions, and `cmake/SofieBLASBackends.cmake` for the shared backend-detection logic.
 
 ## Usage example
@@ -102,13 +106,25 @@ The GPU backends (`BlasCuda`, `BlasHip`) additionally expose
 - an overload of `gemmStridedBatched` with a fused `Epilogue` (bias, ReLU or GELU) and a bias vector with its own batch stride: `blas.gemmStridedBatched('N', 'N', m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount, Epilogue::ReluBias, bias, strideBias)`. A stride of 0 shares the matrix between the batches (broadcast).
 - overloads of `matmul`/`gemm`/`gemmrelu`/`gemmgelu` taking the leading dimensions of A and B (`blas.gemmrelu('N', 'N', m, n, k, alpha, A, lda, B, ldb, beta, bias, C)`), to multiply padded or transposed views of larger buffers with the fused epilogues. `lda`/`ldb` are the column-major leading dimensions (at least the physical number of rows of the matrix) and C is dense. The CPU backends provide the same overloads for raw pointers.
 - `addOperationConfig` that creates the matrix layouts and resolves the multiply algorithm for a call site's shape ahead of its first call (see below).
-- Quantized multiplies, on the GPU backends and, with the same results, on the CPU backends:
-  - `int8Matmul` with an int32 C, or with a float `alpha`, a float bias and an `Epilogue` and an int8 C (`alpha * sum + bias`, ReLU, then rounded half to even and saturated to [-128, 127]);
-  - `int8MatmulVectorAlpha`, the int8-output multiply with one alpha per row of C (a vector of m floats); on CUDA (cuBLASLt has kernels for it with A transposed) and the CPU, not on HIP;
-  - `int8MatmulStridedBatched` (int32 or int8 C) and `matmulFp8Fp32StridedBatched`, over dense matrices with batch strides in elements (0 shares a matrix) and a bias shared by the batches;
-  - `matmulFp8Fp32` / `matmulFp8Fp8` (and on the GPU `matmulFp8Fp16` / `matmulFp8Bf16` / `matmulFp8E5m2`): FP8 E4M3 A and B with a scale each, a BF16 bias, and `C = scaleD * epilogue(alpha * scaleA * scaleB * sum + bias)` for an FP8 C.
+- Quantized multiplies, on the GPU backends and, with the same results, on the CPU backends. They are opt-in: construct the backend with `sofieBLAS<Tag> blas(queue, {.quantization = true});` (the options also take `.cacheLimit`); on a backend constructed without it, calling one throws `std::logic_error`, and `blas.quantizationEnabled()` tells which one you have:
+  - `int8Matmul` with an int32 C: int8 A and B, the exact int32 sum `sum_p op(A)[i, p] * op(B)[p, j]`, with no scaling, bias or epilogue: `blas.int8Matmul('N', 'N', m, n, k, A, B, C)`;
+  - `int8Matmul` with an int8 C: the same exact int32 sum, then scaled and requantized to int8 in one call: `blas.int8Matmul('N', 'N', m, n, k, alpha, A, B, bias, C, Epilogue::ReluBias)` computes `C = saturate(round(epilogue(alpha * sum + bias)))`. `alpha` is a float, `bias` a float vector of m values (one per row of C, may be null when the epilogue adds none), and `Epilogue` is any of `Default`, `Bias`, `ReluBias`, `GeluBias`, `Relu` and `Gelu` (the tanh GELU). The result is rounded half to even and saturated to [-128, 127];
+  - `int8MatmulVectorAlpha`, the int8→int8 multiply with one alpha per row of C (a vector of m floats) instead of a single `alpha`;
+  - `int8MatmulStridedBatched` (int8→int32 or int8→int8) and `matmulFp8Fp32StridedBatched`, over dense matrices with batch strides in elements (0 shares a matrix) and a bias shared by the batches;
+  - `matmulFp8Fp32` / `matmulFp8Fp8` (and on the GPU `matmulFp8Fp16` / `matmulFp8Bf16` / `matmulFp8E5m2`): FP8 E4M3 A and B with a scale each, a BF16 bias, and `C = scaleD * epilogue(alpha * scaleA * scaleB * sum + bias)` for an FP8 C;
+  - `matmulFp16Fp16` and `matmulFp16Fp32`: FP16 (IEEE binary16) A and B, summed and scaled in float, with a `beta`, an `Epilogue` and a bias, writing an FP16 C with an FP16 bias (rounded to half only at the end) or a float C with a float bias. They do not need `.quantization = true`. Every backend names the FP16 element type `Fp16Type` (`__half` on the GPU).
 
-  On the GPU the int8 and FP8 kernels need A transposed (`'T', 'N'`) for the fused epilogues and the FP8 types, and dimensions aligned to 4 (int8) or 16 (FP8); a call the library has no kernel for ends the process, as the float multiplies do. `int8MatmulVectorAlpha` throws `std::runtime_error("unsupported")` on HIP. Every backend names its element types `Fp8E4M3Type` and `Bf16Type`.
+  Every backend names its element types `Fp8E4M3Type`, `Bf16Type` and `Fp16Type`.
+
+  On the GPU every quantized operation has three implementations, and the backend picks one per operation and epilogue when it is constructed with `.quantization = true`:
+  - `GemmMode::Vendor`: the vendor library's own fused kernel (cuBLASLt / hipBLASLt);
+  - `GemmMode::Vendor_withExtendedEpilogue`: the vendor library computes only the plain multiply (the exact int32 sum for int8, or for FP8 the FP16 multiply of the inputs decoded exactly to FP16), and a native kernel applies alpha, the scales, the bias and the activation and writes the output type;
+  - `GemmMode::Native`: everything in alpaka kernels (a tiled shared-memory GEMM with the epilogue fused into its output), for when the vendor library cannot do even the plain multiply. It does not use the matrix cores and is one to two orders of magnitude slower than the vendor paths.
+
+  
+  `blas.capabilities()` shows what a constructed backend chose, so check it on each machine instead of assuming the table above: operations can differ per epilogue, so one GPU can use the fused vendor kernel for `Epilogue::Default` and the two-launch path for `Epilogue::Bias`. A `Vendor_withExtendedEpilogue` operation costs one extra kernel launch; a `Native` one is the slow case.
+
+  The native kernels (`NativeBlas`) and the fallback implementation of every quantized operation (`FallbackBlas`) live in `include/sofieBLAS/backends/native/` and depend only on the alpaka tag. A fallback reaches the vendor library only through the backend's safe-vendor interface (`int8Int32`, `fp16Fp32`), which answers with the vendor multiply only when the constructor verified it and it has a kernel for the shape, and otherwise makes the fallback use the native GEMM. At call time a shape or transpose the vendor library has no kernel for moves down to the next path. `blas.capabilities()` reports the chosen path, for example `blas.capabilities().int8Int8[Epilogue::Bias]`, and `{.quantization = true, .forceNative = true}` runs everything on the native kernels (for testing and comparison).
 
 ## GEMM call instantiation and the algorithm cache
 

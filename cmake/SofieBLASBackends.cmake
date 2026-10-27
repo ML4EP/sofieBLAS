@@ -30,13 +30,50 @@ set(SOFIEBLAS_ENABLE_HIP "AUTO" CACHE STRING "ON/OFF/AUTO: whether to enable the
 set_property(CACHE SOFIEBLAS_ENABLE_CUDA PROPERTY STRINGS ON OFF AUTO)
 set_property(CACHE SOFIEBLAS_ENABLE_HIP PROPERTY STRINGS ON OFF AUTO)
 
+function(sofieblas_detect_nvidia_gpu out)
+  set(${out} FALSE PARENT_SCOPE)
+  find_program(SOFIEBLAS_NVIDIA_SMI nvidia-smi HINTS ${CUDA_BASE}/bin)
+  if(SOFIEBLAS_NVIDIA_SMI)
+    execute_process(COMMAND ${SOFIEBLAS_NVIDIA_SMI} -L
+      OUTPUT_VARIABLE _gpus RESULT_VARIABLE _result ERROR_QUIET)
+    if(_result EQUAL 0 AND _gpus MATCHES "GPU [0-9]+:")
+      set(${out} TRUE PARENT_SCOPE)
+    endif()
+  endif()
+endfunction()
+
+function(sofieblas_detect_amd_gpus out_archs)
+  set(${out_archs} "" PARENT_SCOPE)
+  find_program(SOFIEBLAS_ROCM_AGENT_ENUMERATOR rocm_agent_enumerator
+    HINTS ${ROCM_BASE}/bin)
+  if(SOFIEBLAS_ROCM_AGENT_ENUMERATOR)
+    execute_process(COMMAND ${SOFIEBLAS_ROCM_AGENT_ENUMERATOR}
+      OUTPUT_VARIABLE _agents RESULT_VARIABLE _result ERROR_QUIET)
+    if(_result EQUAL 0)
+      string(REGEX MATCHALL "gfx[0-9a-f]+" _archs "${_agents}")
+      list(REMOVE_ITEM _archs gfx000)
+      list(REMOVE_DUPLICATES _archs)
+      set(${out_archs} "${_archs}" PARENT_SCOPE)
+    endif()
+  endif()
+endfunction()
+
 if(NOT SOFIEBLAS_ENABLE_CUDA STREQUAL "OFF")
+  sofieblas_detect_nvidia_gpu(SOFIEBLAS_HAS_NVIDIA_GPU)
+endif()
+if(SOFIEBLAS_ENABLE_CUDA STREQUAL "OFF")
+  message(STATUS "sofieBLAS: CUDA backend disabled (SOFIEBLAS_ENABLE_CUDA=OFF)")
+elseif(SOFIEBLAS_ENABLE_CUDA STREQUAL "AUTO" AND NOT SOFIEBLAS_HAS_NVIDIA_GPU)
+  message(STATUS "sofieBLAS: no NVIDIA GPU found, CUDA targets disabled (SOFIEBLAS_ENABLE_CUDA=ON builds them anyway)")
+else()
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
     # Default to a portable build: 'all-major' emits SASS for every major arch the
     # installed nvcc supports plus PTX for the newest, so it never requests an arch
     # nvcc doesn't know and still JITs on newer GPUs.
     # Override with -DCMAKE_CUDA_ARCHITECTURES=native (or e.g. 80;90) for faster builds.
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.23)
+    if(SOFIEBLAS_HAS_NVIDIA_GPU AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+      set(CMAKE_CUDA_ARCHITECTURES native)
+    elseif(CMAKE_VERSION VERSION_GREATER_EQUAL 3.23)
       set(CMAKE_CUDA_ARCHITECTURES all-major)
     else()
       set(CMAKE_CUDA_ARCHITECTURES 70 80)
@@ -48,7 +85,7 @@ if(NOT SOFIEBLAS_ENABLE_CUDA STREQUAL "OFF")
     find_package(CUDAToolkit QUIET)
     if(CUDAToolkit_FOUND)
       set(SOFIEBLAS_CUDA_ENABLED TRUE)
-      message(STATUS "sofieBLAS: CUDA toolkit ${CUDAToolkit_VERSION} found, CUDA targets enabled")
+      message(STATUS "sofieBLAS: CUDA toolkit ${CUDAToolkit_VERSION} found, CUDA targets enabled for ${CMAKE_CUDA_ARCHITECTURES}")
     else()
       message(STATUS "sofieBLAS: nvcc found but CUDAToolkit package not found, CUDA targets disabled")
     endif()
@@ -57,26 +94,33 @@ if(NOT SOFIEBLAS_ENABLE_CUDA STREQUAL "OFF")
   else()
     message(STATUS "sofieBLAS: no CUDA compiler found, CUDA targets disabled")
   endif()
-else()
-  message(STATUS "sofieBLAS: CUDA backend disabled (SOFIEBLAS_ENABLE_CUDA=OFF)")
 endif()
 
 if(NOT SOFIEBLAS_ENABLE_HIP STREQUAL "OFF")
+  sofieblas_detect_amd_gpus(SOFIEBLAS_AMD_GPU_ARCHS)
+endif()
+if(SOFIEBLAS_ENABLE_HIP STREQUAL "OFF")
+  message(STATUS "sofieBLAS: HIP backend disabled (SOFIEBLAS_ENABLE_HIP=OFF)")
+elseif(SOFIEBLAS_ENABLE_HIP STREQUAL "AUTO" AND NOT SOFIEBLAS_AMD_GPU_ARCHS)
+  message(STATUS "sofieBLAS: no AMD GPU found, HIP targets disabled (SOFIEBLAS_ENABLE_HIP=ON builds them anyway)")
+else()
   if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR CMAKE_HIP_ARCHITECTURES STREQUAL "")
-    set(CMAKE_HIP_ARCHITECTURES gfx1100)
+    if(SOFIEBLAS_AMD_GPU_ARCHS)
+      set(CMAKE_HIP_ARCHITECTURES ${SOFIEBLAS_AMD_GPU_ARCHS})
+    else()
+      set(CMAKE_HIP_ARCHITECTURES gfx1100)
+    endif()
   endif()
   check_language(HIP)
   if(CMAKE_HIP_COMPILER)
     enable_language(HIP)
     set(SOFIEBLAS_HIP_ENABLED TRUE)
-    message(STATUS "sofieBLAS: HIP compiler found, HIP targets enabled")
+    message(STATUS "sofieBLAS: HIP compiler found, HIP targets enabled for ${CMAKE_HIP_ARCHITECTURES}")
   elseif(SOFIEBLAS_ENABLE_HIP STREQUAL "ON")
     message(FATAL_ERROR "sofieBLAS: SOFIEBLAS_ENABLE_HIP=ON but no HIP compiler was found")
   else()
     message(STATUS "sofieBLAS: no HIP compiler found, HIP targets disabled")
   endif()
-else()
-  message(STATUS "sofieBLAS: HIP backend disabled (SOFIEBLAS_ENABLE_HIP=OFF)")
 endif()
 
 # --- CPU BLAS selection ---
@@ -170,6 +214,45 @@ foreach(_lib IN LISTS _search_order)
     endif()
   endif()
 endforeach()
+
+option(SOFIEBLAS_FETCH_OPENBLAS
+  "Build OpenBLAS from source for the CPU targets when no CPU BLAS library is found" ON)
+set(SOFIEBLAS_OPENBLAS_GIT_TAG "v0.3.28" CACHE STRING
+    "OpenBLAS tag to build when no CPU BLAS library is found")
+
+if(NOT SOFIEBLAS_CPU_BLAS_LIBS AND SOFIEBLAS_FETCH_OPENBLAS)
+  include(ExternalProject)
+  find_package(Threads REQUIRED)
+  set(_openblas_prefix ${CMAKE_BINARY_DIR}/_deps/openblas-install)
+  set(_openblas_lib
+    ${_openblas_prefix}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}openblas${CMAKE_STATIC_LIBRARY_SUFFIX})
+  ExternalProject_Add(sofieblas_openblas_build
+    GIT_REPOSITORY https://github.com/OpenMathLib/OpenBLAS
+    GIT_TAG ${SOFIEBLAS_OPENBLAS_GIT_TAG}
+    GIT_SHALLOW TRUE
+    UPDATE_DISCONNECTED TRUE
+    PREFIX ${CMAKE_BINARY_DIR}/_deps/openblas
+    CMAKE_ARGS
+      -DCMAKE_INSTALL_PREFIX=${_openblas_prefix}
+      -DCMAKE_INSTALL_LIBDIR=lib
+      -DCMAKE_BUILD_TYPE=Release
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      -DBUILD_SHARED_LIBS=OFF
+      -DBUILD_STATIC_LIBS=ON
+      -DBUILD_WITHOUT_LAPACK=ON
+      -DNOFORTRAN=ON
+      -DBUILD_TESTING=OFF
+    BUILD_BYPRODUCTS ${_openblas_lib})
+  add_library(sofieblas_openblas INTERFACE)
+  target_link_libraries(sofieblas_openblas INTERFACE
+    ${_openblas_lib} Threads::Threads m)
+  add_dependencies(sofieblas_openblas sofieblas_openblas_build)
+  set(SOFIEBLAS_CPU_BLAS_LIBS sofieblas_openblas)
+  set(SOFIEBLAS_CPU_BLAS_DEFINE SOFIEBLAS_USE_OPENBLAS)
+  set(SOFIEBLAS_CPU_BLAS_INCLUDE_DIR ${_openblas_prefix}/include/openblas)
+  set(SOFIEBLAS_CPU_BLAS_FOUND "OpenBLAS ${SOFIEBLAS_OPENBLAS_GIT_TAG}, built from source")
+  message(STATUS "sofieBLAS: no CPU BLAS library found (tried: ${_search_order}), building OpenBLAS ${SOFIEBLAS_OPENBLAS_GIT_TAG} from source (SOFIEBLAS_FETCH_OPENBLAS=OFF disables this)")
+endif()
 
 if(NOT SOFIEBLAS_CPU_BLAS_LIBS)
   message(WARNING "sofieBLAS: no suitable CPU BLAS library found (tried: ${_search_order}). CPU targets disabled.")

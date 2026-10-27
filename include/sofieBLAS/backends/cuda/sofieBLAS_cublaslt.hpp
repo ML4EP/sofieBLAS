@@ -43,6 +43,7 @@
 // backends/gpu/detail
 struct CublasLtApi {
   using Queue = alpaka::QueueCudaRtNonBlocking;
+  using Tag = alpaka::TagGpuCudaRt;
   using Handle = cublasLtHandle_t;
   using BlasHandle = cublasHandle_t;
   using Preference = cublasLtMatmulPreference_t;
@@ -64,6 +65,7 @@ struct CublasLtApi {
   static constexpr auto EpilogueReluBias = CUBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = CUBLASLT_EPILOGUE_GELU_BIAS;
   static constexpr auto EpilogueRelu = CUBLASLT_EPILOGUE_RELU;
+  static constexpr auto EpilogueGelu = CUBLASLT_EPILOGUE_GELU;
   static constexpr auto ComputeF32 = CUBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = CUBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = CUDA_R_32F;
@@ -71,16 +73,19 @@ struct CublasLtApi {
   static constexpr auto RealBF16 = CUDA_R_16BF;
   static constexpr auto RealF8E4M3 = CUDA_R_8F_E4M3;
   static constexpr auto RealF8E5M2 = CUDA_R_8F_E5M2;
-  static constexpr auto RealI8  = CUDA_R_8I;
+  static constexpr auto RealI8 = CUDA_R_8I;
   static constexpr auto RealI32 = CUDA_R_32I;
   static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
   static constexpr auto DescBiasDataType = CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
-  static constexpr auto DescAScalePointer = CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
-  static constexpr auto DescBScalePointer = CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
-  static constexpr auto DescDScalePointer = CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  static constexpr auto DescAScalePointer =
+      CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePointer =
+      CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePointer =
+      CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
   static constexpr auto DescPointerMode = CUBLASLT_MATMUL_DESC_POINTER_MODE;
   static constexpr auto PointerModeAlphaDeviceVectorBetaZero =
       CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_ZERO;
@@ -94,6 +99,8 @@ struct CublasLtApi {
       CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = CUBLAS_STATUS_SUCCESS;
+  static constexpr bool ProbeCapabilities = false;
   static constexpr auto StatusNotSupported = CUBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "cuBLASLt";
 

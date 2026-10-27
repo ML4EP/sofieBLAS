@@ -73,10 +73,12 @@ static void refGemmGelu(float *C, const float *A, const float *B,
   refGemm(C, A, B, bias, m, n, k, alpha, beta, transA, transB);
   constexpr float kSqrt2OverPi = 0.7978845608028654f;
   for (int i = 0; i < m * n; ++i)
-    C[i] *= 0.5f * (1.f + std::tanh(kSqrt2OverPi * (C[i] + 0.044715f * C[i] * C[i] * C[i])));
+    C[i] *= 0.5f * (1.f + std::tanh(kSqrt2OverPi *
+                                    (C[i] + 0.044715f * C[i] * C[i] * C[i])));
 }
 
-// the (rows x cols) column-major matrix `dense` stored with leading dimension ld
+// the (rows x cols) column-major matrix `dense` stored with leading dimension
+// ld
 // >= rows; the padding rows are filled with a poison value
 static std::vector<float> padColMajor(const float *dense, int rows, int cols,
                                       int ld) {
@@ -87,8 +89,9 @@ static std::vector<float> padColMajor(const float *dense, int rows, int cols,
   return padded;
 }
 
-// batched multiply with an epilogue: C_b = epilogue(A_b * B_b + bias_b), X_b = X + b * strideX
-// (column-major, A_b stored with leading dimension lda), bias_b a vector of m
+// batched multiply with an epilogue: C_b = epilogue(A_b * B_b + bias_b), X_b =
+// X + b * strideX (column-major, A_b stored with leading dimension lda), bias_b
+// a vector of m
 static void refBatchedEpilogue(float *C, const float *A, int lda,
                                long long strideA, const float *B,
                                long long strideB, const float *bias,
@@ -101,11 +104,14 @@ static void refBatchedEpilogue(float *C, const float *A, int lda,
         float sum = 0.f;
         for (int p = 0; p < k; ++p)
           sum += A[b * strideA + p * lda + i] * B[b * strideB + j * k + p];
-        sum += bias[b * strideBias + i];
-        if (epilogue == Epilogue::ReluBias)
+        if (epilogue != Epilogue::Default && epilogue != Epilogue::Relu &&
+            epilogue != Epilogue::Gelu)
+          sum += bias[b * strideBias + i];
+        if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
           sum = sum > 0.f ? sum : 0.f;
-        else if (epilogue == Epilogue::GeluBias)
-          sum *= 0.5f * (1.f + std::tanh(kSqrt2OverPi * (sum + 0.044715f * sum * sum * sum)));
+        else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
+          sum *= 0.5f * (1.f + std::tanh(kSqrt2OverPi *
+                                         (sum + 0.044715f * sum * sum * sum)));
         C[b * (long long)m * n + j * m + i] = sum;
       }
 static void refMatmulInt8(std::int32_t *C, const std::int8_t *A,
@@ -142,6 +148,25 @@ static void checkEqual(const std::int32_t *got, const std::int32_t *expected,
     std::cout << "  PASS  " << name << "\n";
   else
     ++gFailures;
+template <typename TBlas, typename TQueue>
+static void checkQuantizationOption(TQueue &queue, const std::string &name) {
+  TBlas plain(queue);
+  bool threw = false;
+  try {
+    plain.int8Matmul('N', 'N', 1u, 1u, 1u, static_cast<const int8_t *>(nullptr),
+                     static_cast<const int8_t *>(nullptr),
+                     static_cast<int32_t *>(nullptr));
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  TBlas quantized(queue, {.quantization = true});
+  if (threw && !plain.quantizationEnabled() &&
+      quantized.quantizationEnabled()) {
+    std::cout << "  PASS  " << name << "\n";
+  } else {
+    std::cerr << "  FAIL [" << name << "]\n";
+    ++gFailures;
+  }
 }
 
 static void checkClose(const float *got, const float *expected, int n,
@@ -226,12 +251,14 @@ static void refEpilogue(float *C, const float *A, const float *B,
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < m; ++i) {
       float &x = C[j * m + i];
-      if (epilogue != Epilogue::Default && epilogue != Epilogue::Relu)
+      if (epilogue != Epilogue::Default && epilogue != Epilogue::Relu &&
+          epilogue != Epilogue::Gelu)
         x += bias[i];
       if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
         x = x > 0.f ? x : 0.f;
-      else if (epilogue == Epilogue::GeluBias)
-        x *= 0.5f * (1.f + std::tanh(kSqrt2OverPi * (x + 0.044715f * x * x * x)));
+      else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
+        x *= 0.5f *
+             (1.f + std::tanh(kSqrt2OverPi * (x + 0.044715f * x * x * x)));
     }
 }
 
@@ -246,12 +273,16 @@ static void refMatmulI8Out(int8_t *C, const int8_t *A, const int8_t *B,
   refMatmulI8(acc.data(), A, B, m, n, k, transA, transB);
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < m; ++i) {
-      float x = (alphaVec ? alphaVec[i] : alpha) *
-                static_cast<float>(acc[j * m + i]);
-      if (epilogue == Epilogue::Bias || epilogue == Epilogue::ReluBias)
+      float x =
+          (alphaVec ? alphaVec[i] : alpha) * static_cast<float>(acc[j * m + i]);
+      if (epilogue == Epilogue::Bias || epilogue == Epilogue::ReluBias ||
+          epilogue == Epilogue::GeluBias)
         x += bias[i];
       if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
         x = x > 0.f ? x : 0.f;
+      else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
+        x *= 0.5f * (1.f + std::tanh(0.7978845608028654f *
+                                     (x + 0.044715f * x * x * x)));
       x = std::nearbyint(x);
       C[j * m + i] = static_cast<int8_t>(std::min(127.f, std::max(-128.f, x)));
     }
@@ -367,6 +398,7 @@ int main() {
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
   runCpuTests();
   runCpuQuantizedTests();
+  runCpuFp16Tests();
 #endif
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
   runGpuTests<alpaka::TagGpuCudaRt>();
@@ -374,6 +406,12 @@ int main() {
   runGpuInt8Tests<alpaka::TagGpuCudaRt>();
   runGpuLowPrecisionTests<alpaka::TagGpuCudaRt>();
   runGpuQuantizedTests<alpaka::TagGpuCudaRt>();
+  runGpuTests<alpaka::TagGpuCudaRt>(
+      {.quantization = true, .forceNative = true});
+  runGpuLowPrecisionTests<alpaka::TagGpuCudaRt>(
+      {.quantization = true, .forceNative = true});
+  runGpuQuantizedTests<alpaka::TagGpuCudaRt>(
+      {.quantization = true, .forceNative = true});
 #endif
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
   runGpuTests<alpaka::TagGpuHipRt>();
@@ -381,6 +419,11 @@ int main() {
   runGpuInt8Tests<alpaka::TagGpuHipRt>();
   runGpuLowPrecisionTests<alpaka::TagGpuHipRt>();
   runGpuQuantizedTests<alpaka::TagGpuHipRt>();
+  runGpuTests<alpaka::TagGpuHipRt>({.quantization = true, .forceNative = true});
+  runGpuLowPrecisionTests<alpaka::TagGpuHipRt>(
+      {.quantization = true, .forceNative = true});
+  runGpuQuantizedTests<alpaka::TagGpuHipRt>(
+      {.quantization = true, .forceNative = true});
 #endif
 
   std::cout << "\n";

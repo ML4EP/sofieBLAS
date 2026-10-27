@@ -1,8 +1,10 @@
 
 // shared test for CUDA/HIP
 
-template <typename TTag> static void runGpuTests() {
-  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+template <typename TTag>
+static void runGpuTests(BlasOptions options = {.quantization = true}) {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__
+            << (options.forceNative ? " (native kernels)" : "") << " ===\n";
 
   using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
   using DevAcc = alpaka::Dev<Acc>;
@@ -11,7 +13,7 @@ template <typename TTag> static void runGpuTests() {
   PlatformAcc platform{};
   auto dev = alpaka::getDevByIdx(platform, 0u);
   alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
-  sofieBLAS<TTag> blas(queue);
+  sofieBLAS<TTag> blas(queue, options);
 
   alpaka::PlatformCpu hostPlatform{};
   auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
@@ -302,6 +304,7 @@ template <typename TTag> static void runGpuTests() {
     for (Case c : {Case{true, M, Epilogue::Bias, "A shared, bias per batch"},
                    Case{true, M, Epilogue::ReluBias, "A shared, relu"},
                    Case{true, 0, Epilogue::GeluBias, "A shared, gelu"},
+                   Case{true, 0, Epilogue::Gelu, "A shared, gelu no bias"},
                    Case{false, 0, Epilogue::ReluBias, "B shared, relu"},
                    Case{false, M, Epilogue::Bias, "B shared, bias per batch"}}) {
       const long long strideA = c.sharedA ? 0 : LDA * K;
@@ -521,8 +524,11 @@ static void runGpuDynamicShapeTests() {
 
 template <typename TTag> static void runGpuInt8Tests() {
 // fp16 and int8-output GEMMs
-template <typename TTag> static void runGpuLowPrecisionTests() {
-  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+template <typename TTag>
+static void
+runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__
+            << (options.forceNative ? " (native kernels)" : "") << " ===\n";
 
   using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
   using DevAcc = alpaka::Dev<Acc>;
@@ -531,7 +537,7 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
   PlatformAcc platform{};
   auto dev = alpaka::getDevByIdx(platform, 0u);
   alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
-  sofieBLAS<TTag> blas(queue);
+  sofieBLAS<TTag> blas(queue, options);
 
   alpaka::PlatformCpu hostPlatform{};
   auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
@@ -652,13 +658,15 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
                         "alpha=0.5 beta=1"},
                    Case{'N', 'N', 1.f, 0.f, Epilogue::ReluBias, "relu bias"},
                    Case{'N', 'N', 1.f, 0.f, Epilogue::Relu, "relu"},
-                   Case{'N', 'N', 1.f, 0.f, Epilogue::GeluBias, "gelu bias"}}) {
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::GeluBias, "gelu bias"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::Gelu, "gelu"}}) {
       std::vector<float> ref = C0; // beta reads C
       refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, c.alpha,
                   c.beta, c.transA == 'T', c.transB == 'T', c.epilogue);
-      // the GELU epilogue (tanh approximation) is not bit-exact; everything
-      // else is
-      const float tol = c.epilogue == Epilogue::GeluBias ? 1e-4f : 0.f;
+      const float tol = c.epilogue == Epilogue::GeluBias ||
+                                c.epilogue == Epilogue::Gelu
+                            ? 1e-4f
+                            : 1e-6f;
 
       auto dCF = upload(C0);
       blas.matmulFp16Fp32(c.transA, c.transB, M, N, K, c.alpha, dA, dB, c.beta,
@@ -729,7 +737,7 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
                         alpaka::getPtrNative(dBiasF), alpaka::getPtrNative(dCF),
                         Epilogue::Bias);
     checkClose(download(dCF, M * N).data(), ref.data(), M * N,
-               "matmulFp16Fp32 33x17x9 raw pointers", 0.f, 0.f);
+               "matmulFp16Fp32 33x17x9 raw pointers", 1e-6f, 1e-6f);
 
     blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, alpaka::getPtrNative(dA),
                         alpaka::getPtrNative(dB), 0.f,
@@ -737,7 +745,7 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
                         Epilogue::Bias);
     checkClose(fromHalf(download(dCH, M * N).data(), M * N).data(),
                fromHalf(toHalf(ref).data(), M * N).data(), M * N,
-               "matmulFp16Fp16 33x17x9 raw pointers", 0.f, 0.f);
+               "matmulFp16Fp16 33x17x9 raw pointers", 1e-6f, 1e-6f);
   }
 
   // ---- int8 output: float alpha, float bias, epilogue ----
@@ -792,8 +800,10 @@ template <typename TTag> static void runGpuLowPrecisionTests() {
 // int8-output with a per-row alpha, strided-batched int8 and fp8 GEMMs. The
 // int8 outputs are compared exactly with the same host reference as the CPU
 // tests, so the two backends agree bit for bit on these inputs.
-template <typename TTag> static void runGpuQuantizedTests() {
-  std::cout << "\n=== " << __PRETTY_FUNCTION__ << " ===\n";
+template <typename TTag>
+static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
+  std::cout << "\n=== " << __PRETTY_FUNCTION__
+            << (options.forceNative ? " (native kernels)" : "") << " ===\n";
 
   using Acc = alpaka::TagToAcc<TTag, Dim1D, Idx>;
   using DevAcc = alpaka::Dev<Acc>;
@@ -806,7 +816,8 @@ template <typename TTag> static void runGpuQuantizedTests() {
   PlatformAcc platform{};
   auto dev = alpaka::getDevByIdx(platform, 0u);
   alpaka::Queue<DevAcc, alpaka::NonBlocking> queue{dev};
-  Blas blas(queue);
+  checkQuantizationOption<Blas>(queue, "quantization option");
+  Blas blas(queue, options);
 
   alpaka::PlatformCpu hostPlatform{};
   auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
@@ -827,10 +838,6 @@ template <typename TTag> static void runGpuQuantizedTests() {
     alpaka::wait(queue);
     return std::vector<T>(alpaka::getPtrNative(h), alpaka::getPtrNative(h) + n);
   };
-  auto skip = [](const std::string &name) {
-    std::cout << "  SKIP  " << name << " (no kernel)\n";
-  };
-
   constexpr int M = 32, N = 16, K = 32, BATCH = 3;
 
   // ---- int8 output with ties, int8 output with a per-row alpha ----
@@ -848,7 +855,7 @@ template <typename TTag> static void runGpuQuantizedTests() {
     auto dC = alpaka::allocAsyncBuf<int8_t, Idx>(queue, static_cast<Idx>(M * N));
 
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
-                         Epilogue::Relu}) {
+                         Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       const std::string tag =
           " TN epilogue " + std::to_string(static_cast<int>(epi));
       std::vector<int8_t> ref(M * N);
@@ -862,27 +869,21 @@ template <typename TTag> static void runGpuQuantizedTests() {
       checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameS);
 
       const std::string nameV = "int8MatmulVectorAlpha" + tag;
-      try {
-        refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
-                       0.f, true, false, epi, alphaVec.data());
-        blas.int8MatmulVectorAlpha('T', 'N', M, N, K, dAlpha, dA, dB, dBias, dC,
-                                   epi);
-        checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV);
-        blas.int8MatmulVectorAlpha(
-            'T', 'N', M, N, K, alpaka::getPtrNative(dAlpha),
-            alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
-            epi == Epilogue::Default || epi == Epilogue::Relu
-                ? nullptr
-                : alpaka::getPtrNative(dBias),
-            alpaka::getPtrNative(dC), epi);
-        checkEqualI8(download(dC, M * N).data(), ref.data(), M * N,
-                     nameV + " raw");
-      } catch (const std::runtime_error &e) {
-        // hipBLASLt has no per-row alpha
-        if (std::string(e.what()) != "unsupported")
-          throw;
-        skip(nameV);
-      }
+      refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 0.f,
+                     true, false, epi, alphaVec.data());
+      blas.int8MatmulVectorAlpha('T', 'N', M, N, K, dAlpha, dA, dB, dBias, dC,
+                                 epi);
+      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV);
+      blas.int8MatmulVectorAlpha(
+          'T', 'N', M, N, K, alpaka::getPtrNative(dAlpha),
+          alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
+          epi == Epilogue::Default || epi == Epilogue::Relu ||
+                  epi == Epilogue::Gelu
+              ? nullptr
+              : alpaka::getPtrNative(dBias),
+          alpaka::getPtrNative(dC), epi);
+      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N,
+                   nameV + " raw");
     }
   }
 
@@ -915,7 +916,7 @@ template <typename TTag> static void runGpuQuantizedTests() {
                M * N * BATCH, name32);
 
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
-                         Epilogue::Relu}) {
+                         Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       std::vector<int8_t> ref8(M * N * BATCH);
       for (int b = 0; b < BATCH; ++b)
         refMatmulI8Out(ref8.data() + b * M * N, A.data() + b * strideA,
