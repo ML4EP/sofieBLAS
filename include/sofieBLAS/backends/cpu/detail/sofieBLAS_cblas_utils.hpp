@@ -1,8 +1,8 @@
 #pragma once
 
-// Helpers behind the CPU backends' public API 
-// the fp8 / bf16 element types and conversions, the epilogues, 
-// and the reference int8 and fp8 GEMMs. Included by 
+// Helpers behind the CPU backends' public API
+// the fp8 / bf16 element types and conversions, the epilogues,
+// and the reference int8 and fp8 GEMMs. Included by
 // sofieBLAS_cblas_common.hpp after the vendor CBLAS header.
 
 #ifdef ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED
@@ -17,13 +17,17 @@
 #include <stdexcept>
 #include <vector>
 
-// The element types of the fp8 GEMMs on the CPU: the raw bits of an OCP FP8
-// E4M3 number and of a bfloat16 number, with the size and layout of
-// the GPU types, so a buffer can be passed to either backend.
+// The element types of the fp8 and fp16 GEMMs on the CPU: the raw bits of an
+// OCP FP8 E4M3 number, of a bfloat16 number and of an IEEE binary16 number,
+// with the size and layout of the GPU types, so a buffer can be passed to
+// either backend.
 struct SofieFp8E4M3 {
   uint8_t bits;
 };
 struct SofieBf16 {
+  uint16_t bits;
+};
+struct SofieFp16 {
   uint16_t bits;
 };
 
@@ -86,6 +90,47 @@ inline float bf16ToFloat(SofieBf16 v) {
   return x;
 }
 
+// exact conversion of the binary16 bits to float
+inline float fp16ToFloat(SofieFp16 v) {
+  const unsigned sign = v.bits >> 15, exp = (v.bits >> 10) & 0x1Fu,
+                 mant = v.bits & 0x3FFu;
+  float x;
+  if (exp == 0x1Fu)
+    x = mant ? std::numeric_limits<float>::quiet_NaN()
+             : std::numeric_limits<float>::infinity();
+  else if (exp == 0) // zero and subnormals: steps of 2^-24
+    x = std::ldexp(static_cast<float>(mant), -24);
+  else
+    x = std::ldexp(static_cast<float>(1024u + mant),
+                   static_cast<int>(exp) - 25);
+  return sign ? -x : x;
+}
+
+// round to nearest even; a magnitude of 65520 or more (the midpoint to the
+// next power of two above the largest number, 65504) becomes infinity, NaN
+// stays NaN
+inline SofieFp16 floatToFp16(float x) {
+  const uint16_t sign = std::signbit(x) ? 0x8000u : 0u;
+  if (std::isnan(x))
+    return SofieFp16{static_cast<uint16_t>(sign | 0x7E00u)};
+  const float a = std::fabs(x);
+  if (a >= 65520.f)
+    return SofieFp16{static_cast<uint16_t>(sign | 0x7C00u)};
+  if (a < 0.00006103515625f) { // below 2^-14: subnormal, steps of 2^-24
+    // 1024 steps of 2^-24 is the smallest normal number, whose bits are 0x0400
+    const auto q = static_cast<uint16_t>(std::nearbyint(std::ldexp(a, 24)));
+    return SofieFp16{static_cast<uint16_t>(sign | q)};
+  }
+  int e = std::ilogb(a); // a = 1.f * 2^e, e in [-14, 15]
+  auto q = static_cast<unsigned>(std::nearbyint(std::ldexp(a, 10 - e)));
+  if (q == 2048u) { // rounded up to the next power of two
+    q = 1024u;
+    ++e;
+  }
+  return SofieFp16{
+      static_cast<uint16_t>(sign | ((e + 15) << 10) | (q - 1024u))};
+}
+
 inline void checkLeadingDims(char transa, char transb, unsigned int m,
                              unsigned int n, unsigned int k, unsigned int lda,
                              unsigned int ldb) {
@@ -112,7 +157,7 @@ inline float applyEpilogue(float x, float biasValue, Epilogue epilogue) {
     x += biasValue;
   if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
     x = x > 0.0f ? x : 0.0f;
-  else if (epilogue == Epilogue::GeluBias)
+  else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
     x = geluTanh(x);
   return x;
 }
@@ -238,6 +283,41 @@ inline void executeFp8(char transa, char transb, unsigned int m, unsigned int n,
     for (unsigned int i = 0; i < m; ++i) {
       float &x = C[static_cast<std::size_t>(j) * m + i];
       x = applyEpilogue(x, bias ? bf16ToFloat(bias[i]) : 0.0f, epilogue);
+    }
+}
+
+// float C of the fp16 GEMMs: decode A and B, then
+// C = epilogue(alpha * op(A) * op(B) + beta * C + bias) with the sum, the scale
+// and the epilogue in float. C holds the input of the beta term and the
+// result; bias (one value per row of C) may be null when the epilogue adds
+// none.
+inline void executeFp16(char transa, char transb, unsigned int m,
+                        unsigned int n, unsigned int k, float alpha,
+                        const SofieFp16 *A, const SofieFp16 *B, float beta,
+                        const float *bias, float *C, Epilogue epilogue) {
+  if (epilogueUsesBias(epilogue) && !bias)
+    throw std::invalid_argument("sofieBLAS: bias epilogue without a bias.");
+  const std::size_t sizeA = static_cast<std::size_t>(m) * k;
+  const std::size_t sizeB = static_cast<std::size_t>(k) * n;
+  std::vector<float> fa(sizeA), fb(sizeB);
+  for (std::size_t i = 0; i < sizeA; ++i)
+    fa[i] = fp16ToFloat(A[i]);
+  for (std::size_t i = 0; i < sizeB; ++i)
+    fb[i] = fp16ToFloat(B[i]);
+  const int lda = (transa == 'N' || transa == 'n') ? static_cast<int>(m)
+                                                   : static_cast<int>(k);
+  const int ldb = (transb == 'N' || transb == 'n') ? static_cast<int>(k)
+                                                   : static_cast<int>(n);
+  cblas_sgemm(CblasColMajor, charToTranspose(transa), charToTranspose(transb),
+              static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+              alpha, fa.data(), lda, fb.data(), ldb, beta, C,
+              static_cast<int>(m));
+  if (epilogue == Epilogue::Default)
+    return;
+  for (unsigned int j = 0; j < n; ++j)
+    for (unsigned int i = 0; i < m; ++i) {
+      float &x = C[static_cast<std::size_t>(j) * m + i];
+      x = applyEpilogue(x, bias ? bias[i] : 0.0f, epilogue);
     }
 }
 

@@ -7,33 +7,41 @@
 
 template <class Api> class BlasLt : private BlasLtBase<Api> {
   using Base = BlasLtBase<Api>;
-  using typename Base::BatchKey;
-  using typename Base::BatchedEntry;
+  using Base::algoCache;
   using Base::batchedStore;
   using Base::charToTranspose;
   using Base::createBatchedLayout;
   using Base::d_workspace;
   using Base::executeFp8;
+  using Base::executeFp8Batched;
+  using Base::executeInt8Int8;
+  using Base::executeInt8Int8Batched;
+  using Base::executeInt8Int32;
   using Base::executeMatmul;
   using Base::executeQuantBatched;
-  using Base::floatCaches;
-  using Base::fp16Caches;
-  using Base::fp8Caches;
   using Base::getOrComputeAlgo;
   using Base::getOrCreateDesc;
+  using Base::patchPointer;
+  using Base::patchBiasStride;
+  using DescEntry = typename Base::DescEntry;
   using Base::getOrCreateLayout;
   using Base::handle;
-  using Base::int8Caches;
   using Base::layoutKeyA;
   using Base::layoutKeyB;
   using Base::ltHandle;
   using Base::preference;
+  using Base::requireQuantization;
   using Base::stream;
   using Base::toApiEpilogue;
   using Base::usesBias;
   using Base::workspaceSize;
+  using typename Base::BatchedEntry;
+  using typename Base::BatchKey;
 
 public:
+  using Base::capabilities;
+  using Base::quantizationEnabled;
+
   // the bf16 and fp8 element types of this backend, for the fp8 GEMMs
   using Bf16 = typename Api::Bf16;
   using Fp8E4M3 = typename Api::Fp8E4M3;
@@ -42,10 +50,10 @@ public:
   // the same types under the names shared with the CPU backend
   using Fp8E4M3Type = typename Api::Fp8E4M3;
   using Bf16Type = typename Api::Bf16;
+  using Fp16Type = __half;
 
   std::size_t algoCacheSize() const {
-    return floatCaches.algoCache.size() + fp16Caches.algoCache.size() +
-           int8Caches.algoCache.size() + fp8Caches.algoCache.size();
+    return algoCache.size();
   }
 
   BlasLt(const BlasLt &) = delete;
@@ -55,6 +63,12 @@ public:
 
   BlasLt(typename Api::Queue &queue, std::size_t cacheLimit = 0)
       : Base(queue, cacheLimit) {}
+
+  BlasLt(typename Api::Queue &queue, BlasOptions options)
+      : Base(queue, options.cacheLimit) {
+    if (options.quantization)
+      Base::enableQuantization(options.forceNative);
+  }
 
   // Registers a call site's construction-time shape: creates the three matrix
   // layouts and resolves the multiply algorithm for them up front, so the
@@ -313,8 +327,8 @@ public:
                                  strideC, batchCount);
       auto &desc = getOrCreateDesc(opA, opB, epi);
       int returned = 0;
-      SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc, e.lA, e.lB, e.lC,
-                                           e.lC, preference, 1, &e.h,
+      SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc.desc, e.lA, e.lB,
+                                           e.lC, e.lC, preference, 1, &e.h,
                                            &returned));
       if (returned == 0) {
         std::cerr << "[sofieBLAS] No suitable " << Api::name
@@ -329,15 +343,10 @@ public:
 
     auto &desc = getOrCreateDesc(opA, opB, epi);
     if (usesBias(epi)) {
-      SOFIEBLAS_CHECK_LT(Api::descSetAttribute(desc, Api::DescBiasPointer,
-                                               &bias, sizeof(bias)));
-      if constexpr (requires { Api::DescBiasBatchStride; }) {
-        std::int64_t biasStride = strideBias;
-        SOFIEBLAS_CHECK_LT(Api::descSetAttribute(
-            desc, Api::DescBiasBatchStride, &biasStride, sizeof(biasStride)));
-      }
+      patchPointer(desc, Api::DescBiasPointer, &DescEntry::bias, bias);
+      patchBiasStride(desc, strideBias);
     }
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc, &alpha, A, e.lA, B, e.lB,
+    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc.desc, &alpha, A, e.lA, B, e.lB,
                                    &beta, C, e.lC, C, e.lC, &e.h.algo,
                                    d_workspace, workspaceSize, stream));
   }
@@ -357,27 +366,18 @@ public:
   // and exact; with a float alpha, a float bias and an epilogue, C is int8.
   template <typename TA, typename TB, typename TC>
   inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         TA const &A, TB const &B, TC &C) {
-    const int32_t alpha = 1, beta = 0;
-    auto *c = alpaka::getPtrNative(C);
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  0, 0, Api::ComputeI32, Api::RealI32, Api::RealI8,
-                  Api::RealI32);
+                         unsigned int n, unsigned int k, TA const &A,
+                         TB const &B, TC &C) {
+    requireQuantization();
+    executeInt8Int32(transa, transb, m, n, k, alpaka::getPtrNative(A), 0,
+                   alpaka::getPtrNative(B), 0, alpaka::getPtrNative(C), 0, 1);
   }
 
   inline void int8Matmul(char transa, char transb, unsigned int m,
-                         unsigned int n, unsigned int k,
-                         const int8_t *A, const int8_t *B, int32_t *C) {
-    const int32_t alpha = 1, beta = 0;
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  Api::EpilogueDefault, &alpha, A, B, &beta, C, C, nullptr,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  0, 0, Api::ComputeI32, Api::RealI32, Api::RealI8,
-                  Api::RealI32);
+                         unsigned int n, unsigned int k, const int8_t *A,
+                         const int8_t *B, int32_t *C) {
+    requireQuantization();
+    executeInt8Int32(transa, transb, m, n, k, A, 0, B, 0, C, 0, 1);
   }
 
   template <typename TA, typename TB, typename TBias, typename TC>
@@ -385,41 +385,34 @@ public:
                          unsigned int n, unsigned int k, float alpha,
                          TA const &A, TB const &B, TBias &bias, TC &C,
                          Epilogue epilogue) {
-    const float beta = 0.f;
-    auto *c = alpaka::getPtrNative(C);
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c,
-                  alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
-                  layoutKeyB(transb, k, n), {m, n}, 0, 0, Api::ComputeI32,
-                  Api::RealF32, Api::RealI8, Api::RealI8, Api::RealF32);
+    requireQuantization();
+    executeInt8Int8(transa, transb, m, n, k, alpha, nullptr,
+                      alpaka::getPtrNative(A), alpaka::getPtrNative(B),
+                      alpaka::getPtrNative(bias), alpaka::getPtrNative(C),
+                      epilogue);
   }
 
   inline void int8Matmul(char transa, char transb, unsigned int m,
                          unsigned int n, unsigned int k, float alpha,
                          const int8_t *A, const int8_t *B, const float *bias,
                          int8_t *C, Epilogue epilogue) {
-    const float beta = 0.f;
-    executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                  toApiEpilogue(epilogue), &alpha, A, B, &beta, C, C, bias,
-                  layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n},
-                  0, 0, Api::ComputeI32, Api::RealF32, Api::RealI8,
-                  Api::RealI8, Api::RealF32);
+    requireQuantization();
+    executeInt8Int8(transa, transb, m, n, k, alpha, nullptr, A, B, bias, C,
+                      epilogue);
   }
 
   // int8 GEMM with one alpha per row of C: C[i, j] = epilogue(alphaVector[i]
   // * sum_p op(A)[i, p] * op(B)[p, j] + bias[i]), rounded and saturated to
   // int8 as in the int8-output int8Matmul. alphaVector is a device vector of m
   // floats, beta is zero; bias may be null when the epilogue adds none.
-  // cuBLASLt has kernels for it only with A transposed (TN).
   template <typename TAlpha, typename TA, typename TB, typename TBias,
-            typename TC,
-            typename = std::enable_if_t<!std::is_pointer_v<TC>>>
+            typename TC, typename = std::enable_if_t<!std::is_pointer_v<TC>>>
   inline void int8MatmulVectorAlpha(char transa, char transb, unsigned int m,
                                     unsigned int n, unsigned int k,
                                     TAlpha const &alphaVector, TA const &A,
                                     TB const &B, TBias &bias, TC &C,
                                     Epilogue epilogue) {
+    requireQuantization();
     int8MatmulVectorAlpha(transa, transb, m, n, k,
                           alpaka::getPtrNative(alphaVector),
                           alpaka::getPtrNative(A), alpaka::getPtrNative(B),
@@ -432,17 +425,9 @@ public:
                                     const float *alphaVector, const int8_t *A,
                                     const int8_t *B, const float *bias,
                                     int8_t *C, Epilogue epilogue) {
-    if constexpr (!(requires { Api::PointerModeAlphaDeviceVectorBetaHost; })) {
-      throw std::runtime_error("unsupported");
-    } else {
-      const float beta = 0.f;
-      executeMatmul(charToTranspose(transa), charToTranspose(transb),
-                    toApiEpilogue(epilogue), alphaVector, A, B, &beta, C, C,
-                    bias, layoutKeyA(transa, m, k), layoutKeyB(transb, k, n),
-                    {m, n}, 0, 0, Api::ComputeI32, Api::RealF32, Api::RealI8,
-                    Api::RealI8, Api::RealF32, nullptr, nullptr, nullptr,
-                    /*alphaVector=*/true);
-    }
+    requireQuantization();
+    executeInt8Int8(transa, transb, m, n, k, 0.f, alphaVector, A, B, bias, C,
+                      epilogue);
   }
 
   // Strided-batched int8 GEMMs: for every batch b in [0, batchCount),
@@ -453,39 +438,38 @@ public:
   // applies the epilogue and writes int8 as the int8-output int8Matmul.
   template <typename TA, typename TB, typename TC,
             typename = std::enable_if_t<!std::is_pointer_v<TC>>>
-  inline void int8MatmulStridedBatched(char transa, char transb,
-                                       unsigned int m, unsigned int n,
-                                       unsigned int k, TA const &A,
-                                       long long strideA, TB const &B,
-                                       long long strideB, TC &C,
+  inline void int8MatmulStridedBatched(char transa, char transb, unsigned int m,
+                                       unsigned int n, unsigned int k,
+                                       TA const &A, long long strideA,
+                                       TB const &B, long long strideB, TC &C,
                                        long long strideC, int batchCount) {
+    requireQuantization();
     int8MatmulStridedBatched(transa, transb, m, n, k, alpaka::getPtrNative(A),
                              strideA, alpaka::getPtrNative(B), strideB,
                              alpaka::getPtrNative(C), strideC, batchCount);
   }
 
-  inline void int8MatmulStridedBatched(char transa, char transb,
-                                       unsigned int m, unsigned int n,
-                                       unsigned int k, const int8_t *A,
-                                       long long strideA, const int8_t *B,
-                                       long long strideB, int32_t *C,
-                                       long long strideC, int batchCount) {
-    const int32_t alpha = 1, beta = 0;
-    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
-                        strideB, &beta, nullptr, C, strideC, batchCount,
-                        Epilogue::Default, Api::ComputeI32, Api::RealI32,
-                        Api::RealI8, Api::RealI32, Api::RealF32);
+  inline void int8MatmulStridedBatched(char transa, char transb, unsigned int m,
+                                       unsigned int n, unsigned int k,
+                                       const int8_t *A, long long strideA,
+                                       const int8_t *B, long long strideB,
+                                       int32_t *C, long long strideC,
+                                       int batchCount) {
+    requireQuantization();
+    executeInt8Int32(transa, transb, m, n, k, A, strideA, B, strideB, C, strideC,
+                   batchCount);
   }
 
   template <typename TA, typename TB, typename TBias, typename TC,
             typename = std::enable_if_t<!std::is_pointer_v<TC>>>
-  inline void int8MatmulStridedBatched(char transa, char transb,
-                                       unsigned int m, unsigned int n,
-                                       unsigned int k, float alpha,
-                                       TA const &A, long long strideA,
-                                       TB const &B, long long strideB,
-                                       TBias &bias, TC &C, long long strideC,
-                                       int batchCount, Epilogue epilogue) {
+  inline void int8MatmulStridedBatched(char transa, char transb, unsigned int m,
+                                       unsigned int n, unsigned int k,
+                                       float alpha, TA const &A,
+                                       long long strideA, TB const &B,
+                                       long long strideB, TBias &bias, TC &C,
+                                       long long strideC, int batchCount,
+                                       Epilogue epilogue) {
+    requireQuantization();
     int8MatmulStridedBatched(transa, transb, m, n, k, alpha,
                              alpaka::getPtrNative(A), strideA,
                              alpaka::getPtrNative(B), strideB,
@@ -494,19 +478,16 @@ public:
                              epilogue);
   }
 
-  inline void int8MatmulStridedBatched(char transa, char transb,
-                                       unsigned int m, unsigned int n,
-                                       unsigned int k, float alpha,
-                                       const int8_t *A, long long strideA,
-                                       const int8_t *B, long long strideB,
-                                       const float *bias, int8_t *C,
-                                       long long strideC, int batchCount,
-                                       Epilogue epilogue) {
-    const float beta = 0.f;
-    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
-                        strideB, &beta, bias, C, strideC, batchCount, epilogue,
-                        Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8,
-                        Api::RealF32);
+  inline void int8MatmulStridedBatched(char transa, char transb, unsigned int m,
+                                       unsigned int n, unsigned int k,
+                                       float alpha, const int8_t *A,
+                                       long long strideA, const int8_t *B,
+                                       long long strideB, const float *bias,
+                                       int8_t *C, long long strideC,
+                                       int batchCount, Epilogue epilogue) {
+    requireQuantization();
+    executeInt8Int8Batched(transa, transb, m, n, k, alpha, A, strideA, B,
+                             strideB, bias, C, strideC, batchCount, epilogue);
   }
 
   // fp16 GEMMs: A and B in half precision (__half), summed and scaled in
@@ -567,7 +548,7 @@ public:
   // fp8 GEMMs: A and B in FP8 E4M3, each with its own scale (a device pointer
   // to one float), summed and scaled in float, with beta 0. The bias, for the
   // epilogues that add one, is BF16. The output is float, half, bf16, or FP8
-  // (E4M3 or E5M2) with a scale of its own. 
+  // (E4M3 or E5M2) with a scale of its own.
   template <typename TA, typename TSA, typename TB, typename TSB,
             typename TBias, typename TC>
   inline void matmulFp8Fp32(char transa, char transb, unsigned int m,
@@ -575,6 +556,7 @@ public:
                             TA const &A, TSA const &scaleA, TB const &B,
                             TSB const &scaleB, TBias &bias, TC &C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8Fp32(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
                   alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
                   alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
@@ -587,6 +569,7 @@ public:
                             const Fp8E4M3 *B, const float *scaleB,
                             const Bf16 *bias, float *C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
                Api::RealF32, nullptr, epilogue);
   }
@@ -598,6 +581,7 @@ public:
                             TA const &A, TSA const &scaleA, TB const &B,
                             TSB const &scaleB, TBias &bias, TC &C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8Fp16(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
                   alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
                   alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
@@ -610,6 +594,7 @@ public:
                             const Fp8E4M3 *B, const float *scaleB,
                             const Bf16 *bias, __half *C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
                Api::RealF16, nullptr, epilogue);
   }
@@ -621,6 +606,7 @@ public:
                             TA const &A, TSA const &scaleA, TB const &B,
                             TSB const &scaleB, TBias &bias, TC &C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8Bf16(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
                   alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
                   alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
@@ -633,18 +619,19 @@ public:
                             const Fp8E4M3 *B, const float *scaleB,
                             const Bf16 *bias, Bf16 *C,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
                Api::RealBF16, nullptr, epilogue);
   }
 
   template <typename TA, typename TSA, typename TB, typename TSB,
             typename TBias, typename TC, typename TSD>
-  inline void matmulFp8Fp8(char transa, char transb, unsigned int m,
-                           unsigned int n, unsigned int k, float alpha,
-                           TA const &A, TSA const &scaleA, TB const &B,
-                           TSB const &scaleB, TBias &bias, TC &C,
-                           TSD const &scaleD,
-                           Epilogue epilogue = Epilogue::Default) {
+  inline void
+  matmulFp8Fp8(char transa, char transb, unsigned int m, unsigned int n,
+               unsigned int k, float alpha, TA const &A, TSA const &scaleA,
+               TB const &B, TSB const &scaleB, TBias &bias, TC &C,
+               TSD const &scaleD, Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8Fp8(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
                  alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
                  alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
@@ -658,18 +645,19 @@ public:
                            const Fp8E4M3 *B, const float *scaleB,
                            const Bf16 *bias, Fp8E4M3 *C, const float *scaleD,
                            Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
                Api::RealF8E4M3, scaleD, epilogue);
   }
 
   template <typename TA, typename TSA, typename TB, typename TSB,
             typename TBias, typename TC, typename TSD>
-  inline void matmulFp8E5m2(char transa, char transb, unsigned int m,
-                            unsigned int n, unsigned int k, float alpha,
-                            TA const &A, TSA const &scaleA, TB const &B,
-                            TSB const &scaleB, TBias &bias, TC &C,
-                            TSD const &scaleD,
-                            Epilogue epilogue = Epilogue::Default) {
+  inline void
+  matmulFp8E5m2(char transa, char transb, unsigned int m, unsigned int n,
+                unsigned int k, float alpha, TA const &A, TSA const &scaleA,
+                TB const &B, TSB const &scaleB, TBias &bias, TC &C,
+                TSD const &scaleD, Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8E5m2(transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
                   alpaka::getPtrNative(scaleA), alpaka::getPtrNative(B),
                   alpaka::getPtrNative(scaleB), alpaka::getPtrNative(bias),
@@ -681,9 +669,9 @@ public:
                             unsigned int n, unsigned int k, float alpha,
                             const Fp8E4M3 *A, const float *scaleA,
                             const Fp8E4M3 *B, const float *scaleB,
-                            const Bf16 *bias, Fp8E5M2 *C,
-                            const float *scaleD,
+                            const Bf16 *bias, Fp8E5M2 *C, const float *scaleD,
                             Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B, scaleB, bias, C,
                Api::RealF8E5M2, scaleD, epilogue);
   }
@@ -701,6 +689,7 @@ public:
       TB const &B, TSB const &scaleB, long long strideB, TBias &bias, TC &C,
       long long strideC, int batchCount,
       Epilogue epilogue = Epilogue::Default) {
+    requireQuantization();
     matmulFp8Fp32StridedBatched(
         transa, transb, m, n, k, alpha, alpaka::getPtrNative(A),
         alpaka::getPtrNative(scaleA), strideA, alpaka::getPtrNative(B),
@@ -714,10 +703,8 @@ public:
       const Fp8E4M3 *B, const float *scaleB, long long strideB,
       const Bf16 *bias, float *C, long long strideC, int batchCount,
       Epilogue epilogue = Epilogue::Default) {
-    const float beta = 0.f;
-    executeQuantBatched(transa, transb, m, n, k, &alpha, A, strideA, B,
-                        strideB, &beta, bias, C, strideC, batchCount, epilogue,
-                        Api::ComputeF32, Api::RealF32, Api::RealF8E4M3,
-                        Api::RealF32, Api::RealBF16, scaleA, scaleB);
+    requireQuantization();
+    executeFp8Batched(transa, transb, m, n, k, alpha, A, scaleA, strideA, B,
+                      scaleB, strideB, bias, C, strideC, batchCount, epilogue);
   }
 };

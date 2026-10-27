@@ -6,7 +6,7 @@ static void runCpuTests() {
   alpaka::PlatformCpu platform{};
   auto dev = alpaka::getDevByIdx(platform, 0u);
   alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{dev};
-  sofieBLAS<alpaka::TagCpuSerial> blas(queue);
+  sofieBLAS<alpaka::TagCpuSerial> blas(queue, {.quantization = true});
 
   constexpr int M = 4, N = 3, K = 5;
 
@@ -295,7 +295,8 @@ static void runCpuTests() {
     constexpr int BATCH = 3, LDA = M + 2;
     for (bool sharedA : {true, false})
       for (Epilogue epi :
-           {Epilogue::Bias, Epilogue::ReluBias, Epilogue::GeluBias}) {
+           {Epilogue::Bias, Epilogue::ReluBias, Epilogue::GeluBias,
+            Epilogue::Relu, Epilogue::Gelu}) {
         const long long strideA = sharedA ? 0 : LDA * K;
         const long long strideB = sharedA ? K * N : 0;
         const long long strideBias = sharedA ? M : 0;
@@ -351,7 +352,8 @@ static void runCpuQuantizedTests() {
   auto dev = alpaka::getDevByIdx(platform, 0u);
   alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{dev};
   using Blas = sofieBLAS<alpaka::TagCpuSerial>;
-  Blas blas(queue);
+  checkQuantizationOption<Blas>(queue, "cpu::quantization option");
+  Blas blas(queue, {.quantization = true});
   using Fp8 = typename Blas::Fp8E4M3Type;
   using Bf16 = typename Blas::Bf16Type;
   static_assert(sizeof(Fp8) == 1 && sizeof(Bf16) == 2);
@@ -384,6 +386,8 @@ static void runCpuQuantizedTests() {
                    Case{'N', 'T', 0.5f, Epilogue::Bias, "NT bias ties"},
                    Case{'T', 'T', 1.f / 3.f, Epilogue::ReluBias, "TT relu bias"},
                    Case{'N', 'N', 0.5f, Epilogue::Relu, "relu"},
+                   Case{'N', 'N', 0.5f, Epilogue::Gelu, "gelu"},
+                   Case{'N', 'N', 0.5f, Epilogue::Gelu, "gelu"},
                    Case{'N', 'N', 3.f, Epilogue::Default, "saturated"}}) {
       std::vector<int8_t> ref(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
@@ -406,7 +410,7 @@ static void runCpuQuantizedTests() {
     auto hAlpha = alpaka::allocBuf<float, Idx>(dev, static_cast<Idx>(M));
     std::copy(alphaVec.begin(), alphaVec.end(), alpaka::getPtrNative(hAlpha));
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
-                         Epilogue::Relu}) {
+                         Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       std::vector<int8_t> ref(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 0.f,
                      true, false, epi, alphaVec.data());
@@ -523,7 +527,7 @@ static void runCpuQuantizedTests() {
       biasBf16[i] = Bf16{bf16Bits(bias[i])};
 
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
-                         Epilogue::Relu}) {
+                         Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       const std::string tag = " epilogue " + std::to_string(static_cast<int>(epi));
       for (bool tA : {true, false}) {
         auto ref = refFp8Gemm(bytesA.data(), bytesB.data(), bias.data(), M, N,
@@ -568,5 +572,219 @@ static void runCpuQuantizedTests() {
     checkClose(got.data(), want.data(), M * N * BATCH,
                "cpu::matmulFp8Fp32StridedBatched A shared, relu bias", 1e-5f,
                1e-4f);
+  }
+}
+
+// fp16 GEMMs (not gated by the quantization option, as on the GPU)
+static void runCpuFp16Tests() {
+  std::cout << "\n=== CPU fp16 tests ===\n";
+
+  alpaka::PlatformCpu platform{};
+  auto dev = alpaka::getDevByIdx(platform, 0u);
+  alpaka::Queue<alpaka::DevCpu, alpaka::Blocking> queue{dev};
+  using Blas = sofieBLAS<alpaka::TagCpuSerial>;
+  Blas blas(queue); // no {.quantization = true}
+  using Fp16 = typename Blas::Fp16Type;
+  static_assert(sizeof(Fp16) == 2);
+
+  auto toHalf = [](const std::vector<float> &v) {
+    std::vector<Fp16> h(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i)
+      h[i] = sofieblas::cpu::floatToFp16(v[i]);
+    return h;
+  };
+  auto fromHalf = [](const std::vector<Fp16> &h) {
+    std::vector<float> v(h.size());
+    for (std::size_t i = 0; i < h.size(); ++i)
+      v[i] = sofieblas::cpu::fp16ToFloat(h[i]);
+    return v;
+  };
+
+  // ---- conversions, over every binary16 number ----
+  {
+    bool pass = true;
+    auto fail = [&](const std::string &what, unsigned bits) {
+      std::cerr << "  fp16 " << what << " at bits 0x" << std::hex << bits
+                << std::dec << "\n";
+      pass = false;
+    };
+    for (unsigned b = 0; b < 0x10000; ++b) {
+      const float f = sofieblas::cpu::fp16ToFloat(Fp16{static_cast<uint16_t>(b)});
+      if ((b & 0x7C00u) == 0x7C00u && (b & 0x3FFu)) {
+        if (!std::isnan(f) || !std::isnan(sofieblas::cpu::fp16ToFloat(
+                                  sofieblas::cpu::floatToFp16(f))))
+          fail("NaN", b);
+      } else if (sofieblas::cpu::floatToFp16(f).bits != b)
+        fail("round trip", b);
+    }
+    // between two neighbours: the midpoint goes to the even one, a little
+    // below it to the lower, a little above it to the upper
+    for (unsigned b = 0; b < 0x7C00u; ++b) {
+      const float lo = sofieblas::cpu::fp16ToFloat(Fp16{static_cast<uint16_t>(b)});
+      const float hi =
+          b + 1 == 0x7C00u
+              ? 65536.f
+              : sofieblas::cpu::fp16ToFloat(Fp16{static_cast<uint16_t>(b + 1)});
+      const float mid = 0.5f * (lo + hi);
+      const unsigned even = (b & 1u) ? b + 1 : b;
+      if (sofieblas::cpu::floatToFp16(mid).bits != even)
+        fail("tie", b);
+      if (sofieblas::cpu::floatToFp16(std::nextafter(mid, 0.f)).bits != b)
+        fail("round down", b);
+      if (sofieblas::cpu::floatToFp16(std::nextafter(mid, 1e9f)).bits != b + 1)
+        fail("round up", b);
+      if (sofieblas::cpu::floatToFp16(-mid).bits != (0x8000u | even))
+        fail("negative tie", b);
+    }
+    for (float x : {INFINITY, 1e9f, 65520.f})
+      if (sofieblas::cpu::floatToFp16(x).bits != 0x7C00 ||
+          sofieblas::cpu::floatToFp16(-x).bits != 0xFC00)
+        fail("overflow", 0);
+    if (sofieblas::cpu::floatToFp16(65519.f).bits != 0x7BFF)
+      fail("largest", 0);
+    if (sofieblas::cpu::floatToFp16(-0.f).bits != 0x8000)
+      fail("negative zero", 0);
+    if (pass)
+      std::cout << "  PASS  cpu::fp16 conversions\n";
+    else {
+      std::cerr << "  FAIL [cpu::fp16 conversions]\n";
+      ++gFailures;
+    }
+  }
+
+  // ---- transposes, alpha and beta, epilogues ----
+  {
+    // multiples of 0.25 below 16: exact in half, and every sum is exact in float
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<float> A(M * K), B(K * N), bias(M), C0(M * N);
+    fillSeq(A.data(), M * K, -2.f, 0.25f);
+    fillSeq(B.data(), K * N, -3.f, 0.25f);
+    fillSeq(bias.data(), M, -4.f, 1.f);
+    fillSeq(C0.data(), M * N, 1.f, 0.25f);
+    const auto hA = toHalf(A), hB = toHalf(B), hBias = toHalf(bias);
+
+    struct Case {
+      char transA, transB;
+      float alpha, beta;
+      Epilogue epilogue;
+      const char *name;
+    };
+    for (Case c : {Case{'N', 'N', 1.f, 0.f, Epilogue::Default, "NN"},
+                   Case{'T', 'N', 1.f, 0.f, Epilogue::Default, "TN"},
+                   Case{'N', 'T', 1.f, 0.f, Epilogue::Default, "NT"},
+                   Case{'T', 'T', 1.f, 0.f, Epilogue::Default, "TT"},
+                   Case{'N', 'N', 0.5f, 1.f, Epilogue::Default,
+                        "alpha=0.5 beta=1"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::Bias, "bias"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::ReluBias, "relu bias"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::Relu, "relu"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::GeluBias, "gelu bias"},
+                   Case{'N', 'N', 1.f, 0.f, Epilogue::Gelu, "gelu"}}) {
+      std::vector<float> ref = C0; // beta reads C
+      refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, c.alpha,
+                  c.beta, c.transA == 'T', c.transB == 'T', c.epilogue);
+      const float tol = c.epilogue == Epilogue::GeluBias ||
+                                c.epilogue == Epilogue::Gelu
+                            ? 1e-4f
+                            : 1e-6f;
+
+      std::vector<float> cF = C0;
+      blas.matmulFp16Fp32(c.transA, c.transB, M, N, K, c.alpha, hA.data(),
+                          hB.data(), c.beta, bias.data(), cF.data(),
+                          c.epilogue);
+      checkClose(cF.data(), ref.data(), M * N,
+                 std::string("cpu::matmulFp16Fp32 ") + c.name, tol, tol);
+
+      // a half C: the float result rounded to half
+      auto cH = toHalf(C0);
+      blas.matmulFp16Fp16(c.transA, c.transB, M, N, K, c.alpha, hA.data(),
+                          hB.data(), c.beta, hBias.data(), cH.data(),
+                          c.epilogue);
+      checkClose(fromHalf(cH).data(), fromHalf(toHalf(ref)).data(), M * N,
+                 std::string("cpu::matmulFp16Fp16 ") + c.name, tol, tol);
+    }
+
+    // the same through alpaka buffers
+    auto bA = alpaka::allocBuf<Fp16, Idx>(dev, static_cast<Idx>(M * K));
+    auto bB = alpaka::allocBuf<Fp16, Idx>(dev, static_cast<Idx>(K * N));
+    auto bBias = alpaka::allocBuf<float, Idx>(dev, static_cast<Idx>(M));
+    auto bC = alpaka::allocBuf<float, Idx>(dev, static_cast<Idx>(M * N));
+    std::copy(hA.begin(), hA.end(), alpaka::getPtrNative(bA));
+    std::copy(hB.begin(), hB.end(), alpaka::getPtrNative(bB));
+    std::copy(bias.begin(), bias.end(), alpaka::getPtrNative(bBias));
+    fillVal(alpaka::getPtrNative(bC), M * N, 0.f);
+    std::vector<float> ref(M * N, 0.f);
+    refEpilogue(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 1.f, 0.f,
+                false, false, Epilogue::ReluBias);
+    blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, bA, bB, 0.f, bBias, bC,
+                        Epilogue::ReluBias);
+    checkClose(alpaka::getPtrNative(bC), ref.data(), M * N,
+               "cpu::matmulFp16Fp32 alpaka buffers", 1e-6f, 1e-6f);
+  }
+
+  // ---- the sum is kept in float and rounded to half only at the end ----
+  {
+    // row 0 of A is 2048, 1, 1, ..., 1 and B is all ones, so the float sum is
+    // 2055. Half numbers above 2048 are 2 apart, so a sum kept in half cannot
+    // reach 2055; written as half, 2055 rounds to 2056.
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<float> A(M * K, 0.f), B(K * N, 1.f);
+    A[0] = 2048.f;
+    for (int p = 1; p < K; ++p)
+      A[p * M] = 1.f;
+    std::vector<float> ref(M * N, 0.f);
+    refMatmul(ref.data(), A.data(), B.data(), M, N, K, 1.f, 0.f, false, false);
+    const auto hA = toHalf(A), hB = toHalf(B);
+    const std::vector<float> zerosF(M * N, 0.f), biasF(M, 0.f);
+
+    auto cF = zerosF;
+    blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
+                        biasF.data(), cF.data());
+    checkClose(cF.data(), ref.data(), M * N,
+               "cpu::matmulFp16Fp32 sum kept in float (2055)", 0.f, 0.f);
+
+    auto cH = toHalf(zerosF);
+    blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
+                        toHalf(biasF).data(), cH.data());
+    checkClose(fromHalf(cH).data(), fromHalf(toHalf(ref)).data(), M * N,
+               "cpu::matmulFp16Fp16 rounded to half at the end (2056)", 0.f,
+               0.f);
+  }
+
+  // ---- a null bias with an epilogue that adds none; one that needs it throws
+  {
+    constexpr int M = 8, N = 4, K = 8;
+    std::vector<float> A(M * K), B(K * N);
+    fillSeq(A.data(), M * K, -2.f, 0.25f);
+    fillSeq(B.data(), K * N, -3.f, 0.25f);
+    const auto hA = toHalf(A), hB = toHalf(B);
+    std::vector<float> ref(M * N, 0.f), got(M * N, 0.f);
+    refEpilogue(ref.data(), A.data(), B.data(), nullptr, M, N, K, 1.f, 0.f,
+                false, false, Epilogue::Relu);
+    blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
+                        static_cast<const float *>(nullptr), got.data(),
+                        Epilogue::Relu);
+    checkClose(got.data(), ref.data(), M * N, "cpu::matmulFp16Fp32 null bias",
+               1e-6f, 1e-6f);
+    auto cH = toHalf(got);
+    blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
+                        static_cast<const Fp16 *>(nullptr), cH.data(),
+                        Epilogue::Relu);
+    checkClose(fromHalf(cH).data(), fromHalf(toHalf(ref)).data(), M * N,
+               "cpu::matmulFp16Fp16 null bias", 1e-6f, 1e-6f);
+    bool threw = false;
+    try {
+      blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
+                          static_cast<const float *>(nullptr), got.data(),
+                          Epilogue::Bias);
+    } catch (const std::invalid_argument &) {
+      threw = true;
+    }
+    if (threw)
+      std::cout << "  PASS  cpu::matmulFp16Fp32 bias epilogue without a bias throws\n";
+    else {
+      std::cerr << "  FAIL [cpu::matmulFp16Fp32 bias epilogue without a bias]\n";
+      ++gFailures;
+    }
   }
 }

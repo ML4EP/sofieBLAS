@@ -2,7 +2,6 @@
 
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
 
-#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -44,6 +43,7 @@
 // backends/gpu/detail
 struct HipblasLtApi {
   using Queue = alpaka::QueueHipRtNonBlocking;
+  using Tag = alpaka::TagGpuHipRt;
   using Handle = hipblasLtHandle_t;
   using BlasHandle = hipblasHandle_t;
   using Preference = hipblasLtMatmulPreference_t;
@@ -65,6 +65,7 @@ struct HipblasLtApi {
   static constexpr auto EpilogueReluBias = HIPBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = HIPBLASLT_EPILOGUE_GELU_BIAS;
   static constexpr auto EpilogueRelu = HIPBLASLT_EPILOGUE_RELU;
+  static constexpr auto EpilogueGelu = HIPBLASLT_EPILOGUE_GELU;
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
@@ -85,16 +86,16 @@ struct HipblasLtApi {
       HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
   static constexpr auto DescDScalePointer =
       HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
-  // The per-row alpha vector pointer mode and the bias batch stride of
-  // cuBLASLt (PointerModeAlphaDeviceVectorBetaHost, DescBiasBatchStride) are
-  // not mapped for hipBLASLt. The shared code checks whether the table has
-  // them: int8MatmulVectorAlpha throws "unsupported" here, and a batched
-  // bias with its own stride is issued one batch at a time.
+  static constexpr auto DescPointerMode = HIPBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PointerModeAlphaDeviceVectorBetaHost =
+      HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
       HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = HIPBLAS_STATUS_SUCCESS;
+  static constexpr bool ProbeCapabilities = true;
   static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "hipBLASLt";
 
@@ -126,6 +127,8 @@ struct HipblasLtApi {
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
 #define SOFIEBLAS_CHECK_RT(err) CHECK_HIP(err)
+
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 
 using BlasHip = BlasLt<HipblasLtApi>;
 
