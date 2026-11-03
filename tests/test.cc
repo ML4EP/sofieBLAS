@@ -114,40 +114,10 @@ static void refBatchedEpilogue(float *C, const float *A, int lda,
                                          (sum + 0.044715f * sum * sum * sum)));
         C[b * (long long)m * n + j * m + i] = sum;
       }
-static void refMatmulInt8(std::int32_t *C, const std::int8_t *A,
-                          const std::int8_t *B, int m, int n, int k, bool transA,
-                          bool transB) {
-  int lda = transA ? k : m;
-  int ldb = transB ? n : k;
-  for (int j = 0; j < n; ++j) {
-    for (int i = 0; i < m; ++i) {
-      std::int32_t sum = 0;
-      for (int p = 0; p < k; ++p) {
-        std::int32_t a = transA ? A[i * lda + p] : A[p * lda + i];
-        std::int32_t b = transB ? B[p * ldb + j] : B[j * ldb + p];
-        sum += a * b;
-      }
-      C[j * m + i] = sum;
-    }
-  }
 }
 
 static int gFailures = 0;
 
-static void checkEqual(const std::int32_t *got, const std::int32_t *expected,
-                       int n, const std::string &name) {
-  bool pass = true;
-  for (int i = 0; i < n; ++i) {
-    if (got[i] != expected[i]) {
-      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
-                << " expected=" << expected[i] << "\n";
-      pass = false;
-    }
-  }
-  if (pass)
-    std::cout << "  PASS  " << name << "\n";
-  else
-    ++gFailures;
 template <typename TBlas, typename TQueue>
 static void checkQuantizationOption(TQueue &queue, const std::string &name) {
   TBlas plain(queue);
@@ -220,10 +190,10 @@ static void refMatmulI8(int32_t *C, const int8_t *A, const int8_t *B, int m,
 }
 
 static void checkEqual(const int32_t *got, const int32_t *expected, int n,
-                       const std::string &name) {
+                       const std::string &name, int tol = 0) {
   bool pass = true;
   for (int i = 0; i < n; ++i) {
-    if (got[i] != expected[i]) {
+    if (std::abs(got[i] - expected[i]) > tol) {
       std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
                 << " expected=" << expected[i] << "\n";
       pass = false;
@@ -298,9 +268,9 @@ static void fillI8Pattern(std::vector<int8_t> &A, std::vector<int8_t> &B) {
 }
 
 static void checkEqualI8(const int8_t *got, const int8_t *expected, int n,
-                         const std::string &name) {
+                         const std::string &name, int tol = 0) {
   const std::vector<int32_t> g(got, got + n), e(expected, expected + n);
-  checkEqual(g.data(), e.data(), n, name);
+  checkEqual(g.data(), e.data(), n, name, tol);
 }
 
 // OCP FP8 E4M3 (e4m3fn) bits to float, exact
@@ -403,7 +373,6 @@ int main() {
 #ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
   runGpuTests<alpaka::TagGpuCudaRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuCudaRt>();
-  runGpuInt8Tests<alpaka::TagGpuCudaRt>();
   runGpuLowPrecisionTests<alpaka::TagGpuCudaRt>();
   runGpuQuantizedTests<alpaka::TagGpuCudaRt>();
   runGpuTests<alpaka::TagGpuCudaRt>(
@@ -416,7 +385,6 @@ int main() {
 #ifdef ALPAKA_ACC_GPU_HIP_ENABLED
   runGpuTests<alpaka::TagGpuHipRt>();
   runGpuDynamicShapeTests<alpaka::TagGpuHipRt>();
-  runGpuInt8Tests<alpaka::TagGpuHipRt>();
   runGpuLowPrecisionTests<alpaka::TagGpuHipRt>();
   runGpuQuantizedTests<alpaka::TagGpuHipRt>();
   runGpuTests<alpaka::TagGpuHipRt>({.quantization = true, .forceNative = true});

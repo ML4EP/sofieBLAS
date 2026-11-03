@@ -522,7 +522,6 @@ static void runGpuDynamicShapeTests() {
   }
 }
 
-template <typename TTag> static void runGpuInt8Tests() {
 // fp16 and int8-output GEMMs
 template <typename TTag>
 static void
@@ -542,76 +541,6 @@ runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
   alpaka::PlatformCpu hostPlatform{};
   auto hostDev = alpaka::getDevByIdx(hostPlatform, 0u);
 
-  constexpr int M = 16, N = 32, K = 32, BATCH = 2;
-
-  auto hA = alpaka::allocBuf<std::int8_t, Idx>(hostDev,
-                                              static_cast<Idx>(BATCH * M * K));
-  auto hB = alpaka::allocBuf<std::int8_t, Idx>(hostDev,
-                                              static_cast<Idx>(BATCH * K * N));
-  auto hC = alpaka::allocBuf<std::int32_t, Idx>(hostDev,
-                                               static_cast<Idx>(BATCH * M * N));
-  std::int8_t *A = alpaka::getPtrNative(hA);
-  std::int8_t *B = alpaka::getPtrNative(hB);
-  std::int32_t *C = alpaka::getPtrNative(hC);
-  for (int i = 0; i < BATCH * M * K; ++i)
-    A[i] = static_cast<std::int8_t>(i % 23 - 11);
-  for (int i = 0; i < BATCH * K * N; ++i)
-    B[i] = static_cast<std::int8_t>(i % 19 - 9);
-
-  auto dA = alpaka::allocAsyncBuf<std::int8_t, Idx>(
-      queue, static_cast<Idx>(BATCH * M * K));
-  auto dB = alpaka::allocAsyncBuf<std::int8_t, Idx>(
-      queue, static_cast<Idx>(BATCH * K * N));
-  auto dC = alpaka::allocAsyncBuf<std::int32_t, Idx>(
-      queue, static_cast<Idx>(BATCH * M * N));
-  alpaka::memcpy(queue, dA, hA);
-  alpaka::memcpy(queue, dB, hB);
-  alpaka::wait(queue);
-
-  std::vector<std::int32_t> ref(BATCH * M * N);
-  auto verify = [&](int count, const std::string &name) {
-    alpaka::memcpy(queue, hC, dC);
-    alpaka::wait(queue);
-    checkEqual(C, ref.data(), count, name);
-  };
-  auto probe = [&](bool got, const std::string &name) {
-    if (got)
-      std::cout << "  PASS  " << name << "\n";
-    else {
-      std::cerr << "  FAIL [" << name << "] no int8 kernel reported\n";
-      ++gFailures;
-    }
-  };
-
-  // ---- int8 matmul NN ----
-  probe(blas.addOperationConfig('N', 'N', M, N, K, DataType::I8, DataType::I32),
-        "int8 probe NN");
-  refMatmulInt8(ref.data(), A, B, M, N, K, false, false);
-  blas.matmul('N', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
-              alpaka::getPtrNative(dB), std::int32_t{0},
-              alpaka::getPtrNative(dC));
-  verify(M * N, "int8 matmul NN");
-
-  // ---- int8 matmul TN (A stored k x m) ----
-  probe(blas.addOperationConfig('T', 'N', M, N, K, DataType::I8, DataType::I32),
-        "int8 probe TN");
-  refMatmulInt8(ref.data(), A, B, M, N, K, true, false);
-  blas.matmul('T', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
-              alpaka::getPtrNative(dB), std::int32_t{0},
-              alpaka::getPtrNative(dC));
-  verify(M * N, "int8 matmul TN");
-
-  // ---- int8 matmul NN, strided batch of 2 ----
-  probe(blas.addOperationConfig('N', 'N', M, N, K, DataType::I8, DataType::I32,
-                                BATCH, M * K, K * N, M * N),
-        "int8 probe batched");
-  for (int b = 0; b < BATCH; ++b)
-    refMatmulInt8(ref.data() + b * M * N, A + b * M * K, B + b * K * N, M, N,
-                  K, false, false);
-  blas.matmul('N', 'N', M, N, K, std::int32_t{1}, alpaka::getPtrNative(dA),
-              alpaka::getPtrNative(dB), std::int32_t{0},
-              alpaka::getPtrNative(dC), BATCH, M * K, K * N, M * N);
-  verify(BATCH * M * N, "int8 matmul batched");
   // copy a host vector into a new device buffer
   auto upload = [&](const auto &v) {
     using T = typename std::decay_t<decltype(v)>::value_type;
@@ -859,6 +788,9 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
       const std::string tag =
           " TN epilogue " + std::to_string(static_cast<int>(epi));
       std::vector<int8_t> ref(M * N);
+      // vendor GELU can round a .5 tie the other way
+      const int tol =
+          epi == Epilogue::GeluBias || epi == Epilogue::Gelu ? 1 : 0;
 
       const std::string nameS = "int8Matmul int8 out alpha=0.5 (ties)" + tag;
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
@@ -866,14 +798,14 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
       blas.int8Matmul('T', 'N', M, N, K, 0.5f, alpaka::getPtrNative(dA),
                       alpaka::getPtrNative(dB), alpaka::getPtrNative(dBias),
                       alpaka::getPtrNative(dC), epi);
-      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameS);
+      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameS, tol);
 
       const std::string nameV = "int8MatmulVectorAlpha" + tag;
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 0.f,
                      true, false, epi, alphaVec.data());
       blas.int8MatmulVectorAlpha('T', 'N', M, N, K, dAlpha, dA, dB, dBias, dC,
                                  epi);
-      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV);
+      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV, tol);
       blas.int8MatmulVectorAlpha(
           'T', 'N', M, N, K, alpaka::getPtrNative(dAlpha),
           alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
@@ -883,7 +815,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
               : alpaka::getPtrNative(dBias),
           alpaka::getPtrNative(dC), epi);
       checkEqualI8(download(dC, M * N).data(), ref.data(), M * N,
-                   nameV + " raw");
+                   nameV + " raw", tol);
     }
   }
 
@@ -929,7 +861,8 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
           alpaka::getPtrNative(dB), strideB, alpaka::getPtrNative(dBias),
           alpaka::getPtrNative(dC8), M * N, BATCH, epi);
       checkEqualI8(download(dC8, M * N * BATCH).data(), ref8.data(),
-                   M * N * BATCH, name8);
+                   M * N * BATCH, name8,
+                   epi == Epilogue::GeluBias || epi == Epilogue::Gelu ? 1 : 0);
     }
   }
 
