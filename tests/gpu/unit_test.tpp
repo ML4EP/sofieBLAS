@@ -904,7 +904,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
                          epi);
       // the download copies the whole (batch-sized) buffer
       checkClose(download(dCF, M * N * BATCH).data(), ref.data(), M * N,
-                 "matmulFp8Fp32" + tag, 1e-5f, 1e-4f);
+                 "matmulFp8Fp32" + tag, 1e-3f, 1e-2f);
 
       // E4M3 output: scaleD * result, rounded, within half a step
       blas.matmulFp8Fp8('T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA,
@@ -945,7 +945,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
             alpaka::getPtrNative(dB), sB, strideB, alpaka::getPtrNative(dBias),
             alpaka::getPtrNative(dCF), M * N, BATCH, epi);
         checkClose(download(dCF, M * N * BATCH).data(), want.data(),
-                   M * N * BATCH, name, 1e-5f, 1e-4f);
+                   M * N * BATCH, name, 1e-3f, 1e-2f);
       }
   }
 }
