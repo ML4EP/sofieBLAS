@@ -132,6 +132,8 @@ jobs:
               l40s: { runner: 'ml4ep-l40s', backend: 'cuda' },
               h100: { runner: 'ml4ep-h100', backend: 'cuda' },
               'h100-47gb': { runner: 'ml4ep-h100-47gb', backend: 'cuda' },
+              'h100-12gb': { runner: 'ml4ep-h100-12gb', backend: 'cuda' },
+              rtx6000: { runner: 'ml4ep-rtx6000', backend: 'cuda' },
               w7900: { runner: 'ml4ep-w7900', backend: 'hip' },
               mi300x: { runner: 'ml4ep-mi300x', backend: 'hip' },
             };
