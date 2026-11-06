@@ -219,6 +219,29 @@ option(SOFIEBLAS_FETCH_OPENBLAS
   "Build OpenBLAS from source for the CPU targets when no CPU BLAS library is found" ON)
 set(SOFIEBLAS_OPENBLAS_GIT_TAG "v0.3.28" CACHE STRING
     "OpenBLAS tag to build when no CPU BLAS library is found")
+# Architecture-independent OpenBLAS configuration. Build-time CPU detection
+# could fail on CPUs the pinned OpenBLAS does not know, leaving the GEMM
+# unroll macros undefined. Where OpenBLAS supports
+# DYNAMIC_ARCH we build all kernels and select one at run time (unknown CPUs
+# fall back to the nearest kernel); elsewhere we use the portable GENERIC core.
+# Set SOFIEBLAS_OPENBLAS_TARGET (e.g. HASWELL, ZEN) to force a specific core.
+set(SOFIEBLAS_OPENBLAS_TARGET "" CACHE STRING
+    "Force OpenBLAS TARGET core (empty = auto: DYNAMIC_ARCH or GENERIC)")
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _sb_proc)
+set(_openblas_arch_args)
+if(SOFIEBLAS_OPENBLAS_TARGET)
+  list(APPEND _openblas_arch_args -DTARGET=${SOFIEBLAS_OPENBLAS_TARGET})
+elseif(_sb_proc MATCHES "^(x86_64|amd64)$")
+  # An explicit baseline TARGET is required: without it OpenBLAS probes the
+  # build CPU, which fails for unrecognised CPUs.
+  list(APPEND _openblas_arch_args -DDYNAMIC_ARCH=ON -DTARGET=GENERIC)
+elseif(_sb_proc MATCHES "^(aarch64|arm64)$")
+  list(APPEND _openblas_arch_args -DDYNAMIC_ARCH=ON -DTARGET=ARMV8)
+elseif(_sb_proc MATCHES "^(ppc64le|powerpc64le)$")
+  list(APPEND _openblas_arch_args -DDYNAMIC_ARCH=ON -DTARGET=POWER8)
+else()
+  list(APPEND _openblas_arch_args -DTARGET=GENERIC)
+endif()
 
 if(NOT SOFIEBLAS_CPU_BLAS_LIBS AND SOFIEBLAS_FETCH_OPENBLAS)
   include(ExternalProject)
@@ -241,6 +264,7 @@ if(NOT SOFIEBLAS_CPU_BLAS_LIBS AND SOFIEBLAS_FETCH_OPENBLAS)
       -DBUILD_STATIC_LIBS=ON
       -DBUILD_WITHOUT_LAPACK=ON
       -DNOFORTRAN=ON
+      ${_openblas_arch_args}
       -DBUILD_TESTING=OFF
     BUILD_BYPRODUCTS ${_openblas_lib})
   add_library(sofieblas_openblas INTERFACE)
