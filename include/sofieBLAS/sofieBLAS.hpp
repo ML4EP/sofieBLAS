@@ -3,8 +3,7 @@
 #include "sofieBLAS/core.hpp"
 
 #if defined(ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED)
-// If no CPU BLAS backend was selected on the compiler command line,
-// default to OpenBLAS
+// If no CPU BLAS backend was selected, default to OpenBLAS
 #if !defined(SOFIEBLAS_USE_OPENBLAS) && !defined(SOFIEBLAS_USE_MKL) &&         \
     !defined(SOFIEBLAS_USE_BLIS) && !defined(SOFIEBLAS_USE_ACCELERATE)
 #define SOFIEBLAS_USE_OPENBLAS
@@ -22,7 +21,7 @@
 #endif
 
 #if defined(ALPAKA_ACC_GPU_CUDA_ENABLED)
-#include "sofieBLAS/backends/cuda/sofieBLAS_cublas.hpp"
+#include "sofieBLAS/backends/cuda/sofieBLAS_cublaslt.hpp"
 #endif
 
 #if defined(ALPAKA_ACC_GPU_HIP_ENABLED)

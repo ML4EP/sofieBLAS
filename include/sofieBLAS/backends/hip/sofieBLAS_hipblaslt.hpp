@@ -11,11 +11,15 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_fp8.h>
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 
@@ -39,6 +43,7 @@
 // backends/gpu/detail
 struct HipblasLtApi {
   using Queue = alpaka::QueueHipRtNonBlocking;
+  using Tag = alpaka::TagGpuHipRt;
   using Handle = hipblasLtHandle_t;
   using BlasHandle = hipblasHandle_t;
   using Preference = hipblasLtMatmulPreference_t;
@@ -48,6 +53,19 @@ struct HipblasLtApi {
   using HeuristicResult = hipblasLtMatmulHeuristicResult_t;
   using Operation = hipblasOperation_t;
   using Epilogue = hipblasLtEpilogue_t;
+  using Bf16 = __hip_bfloat16;
+#ifdef SOFIEBLAS_HIP_FP8_FNUZ
+  // some architectures (e.g., gfx942) only supports the FNUZ fp8 formats in device code, 
+  // so a build for it takes FNUZ data from the caller; CMake defines SOFIEBLAS_HIP_FP8_FNUZ when
+  // the HIP targets are such architectures. Every other target takes OCP.
+  using Fp8E4M3 = __hip_fp8_e4m3_fnuz;
+  using Fp8E5M2 = __hip_fp8_e5m2_fnuz;
+  static constexpr bool Fp8Fnuz = true;
+#else
+  using Fp8E4M3 = __hip_fp8_e4m3;
+  using Fp8E5M2 = __hip_fp8_e5m2;
+  static constexpr bool Fp8Fnuz = false;
+#endif
 
   static constexpr auto OpN = HIPBLAS_OP_N;
   static constexpr auto OpT = HIPBLAS_OP_T;
@@ -56,21 +74,44 @@ struct HipblasLtApi {
   static constexpr auto EpilogueBias = HIPBLASLT_EPILOGUE_BIAS;
   static constexpr auto EpilogueReluBias = HIPBLASLT_EPILOGUE_RELU_BIAS;
   static constexpr auto EpilogueGeluBias = HIPBLASLT_EPILOGUE_GELU_BIAS;
+  static constexpr auto EpilogueRelu = HIPBLASLT_EPILOGUE_RELU;
+  static constexpr auto EpilogueGelu = HIPBLASLT_EPILOGUE_GELU;
   static constexpr auto ComputeF32 = HIPBLAS_COMPUTE_32F;
   static constexpr auto ComputeI32 = HIPBLAS_COMPUTE_32I;
   static constexpr auto RealF32 = HIP_R_32F;
-  static constexpr auto RealI8  = HIP_R_8I;
+  static constexpr auto RealF16 = HIP_R_16F;
+  static constexpr auto RealBF16 = HIP_R_16BF;
+#ifdef SOFIEBLAS_HIP_FP8_FNUZ
+  static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3_FNUZ;
+  static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2_FNUZ;
+#else
+  static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3;
+  static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2;
+#endif
+  static constexpr auto RealI8 = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
   static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
-  static constexpr bool SupportsBiasBatchStride = false;
+  static constexpr auto DescBiasDataType = HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto DescAScalePointer =
+      HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePointer =
+      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePointer =
+      HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  static constexpr auto DescPointerMode = HIPBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PointerModeAlphaDeviceVectorBetaHost =
+      HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
       HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = HIPBLAS_STATUS_SUCCESS;
+  static constexpr bool ProbeCapabilities = true;
+  static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "hipBLASLt";
 
   static constexpr auto ltCreate = hipblasLtCreate;
@@ -97,12 +138,16 @@ struct HipblasLtApi {
     return hipMalloc(ptr, size);
   }
   static hipError_t rtFree(void *ptr) { return hipFree(ptr); }
+  static constexpr auto RtSuccess = hipSuccess;
+  static const char *rtErrorString(hipError_t err) {
+    return hipGetErrorString(err);
+  }
 };
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
 #define SOFIEBLAS_CHECK_RT(err) CHECK_HIP(err)
 
-#include "../gpu/detail/sofieBLAS_blaslt_common.tpp"
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 
 using BlasHip = BlasLt<HipblasLtApi>;
 
