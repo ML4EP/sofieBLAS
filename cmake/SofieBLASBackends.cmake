@@ -115,6 +115,42 @@ else()
   if(CMAKE_HIP_COMPILER)
     enable_language(HIP)
     set(SOFIEBLAS_HIP_ENABLED TRUE)
+
+    # fp8 format of the HIP backend, a compile-time choice. 
+    # The ROCm header is asked, per target, the format it supports.
+    # FNUZ-only hardware (gfx942) takes FNUZ data from the caller,
+    # OCP-only hardware (gfx950, gfx12) takes OCP. Targets without fp8 hardware
+    # convert both in software and follow the others. FNUZ-only and OCP-only
+    # targets cannot share a build.
+    set(_sofieblas_targets ${CMAKE_HIP_ARCHITECTURES})
+    if(_sofieblas_targets STREQUAL "native")
+      set(_sofieblas_targets ${SOFIEBLAS_AMD_GPU_ARCHS})
+    endif()
+    set(_sofieblas_fnuz_targets "")
+    set(_sofieblas_ocp_targets "")
+    foreach(_arch IN LISTS _sofieblas_targets)
+      foreach(_kind FNUZ OCP)
+        execute_process(
+          COMMAND ${CMAKE_HIP_COMPILER} -x hip --offload-arch=${_arch}
+                  --offload-device-only -fsyntax-only -DSOFIEBLAS_PROBE_${_kind}_ONLY
+                  ${CMAKE_CURRENT_LIST_DIR}/sofieblas_fp8_check.hip
+          RESULT_VARIABLE _result OUTPUT_QUIET ERROR_QUIET)
+        if(_result EQUAL 0)
+          list(APPEND _sofieblas_${_kind}_ONLY_targets ${_arch})
+        endif()
+      endforeach()
+    endforeach()
+    set(_sofieblas_fnuz_targets ${_sofieblas_FNUZ_ONLY_targets})
+    set(_sofieblas_ocp_targets ${_sofieblas_OCP_ONLY_targets})
+    if(_sofieblas_fnuz_targets AND _sofieblas_ocp_targets)
+      message(FATAL_ERROR "sofieBLAS: the HIP targets mix FNUZ-only fp8 (${_sofieblas_fnuz_targets}) "
+        "with OCP-only fp8 (${_sofieblas_ocp_targets}). Build them separately.")
+    elseif(_sofieblas_fnuz_targets)
+      target_compile_definitions(sofieBLAS INTERFACE SOFIEBLAS_HIP_FP8_FNUZ=1)
+      message(STATUS "sofieBLAS: HIP fp8 format is FNUZ (${_sofieblas_fnuz_targets})")
+    else()
+      message(STATUS "sofieBLAS: HIP fp8 format is OCP")
+    endif()
     message(STATUS "sofieBLAS: HIP compiler found, HIP targets enabled for ${CMAKE_HIP_ARCHITECTURES}")
   elseif(SOFIEBLAS_ENABLE_HIP STREQUAL "ON")
     message(FATAL_ERROR "sofieBLAS: SOFIEBLAS_ENABLE_HIP=ON but no HIP compiler was found")
@@ -243,9 +279,60 @@ else()
   list(APPEND _openblas_arch_args -DTARGET=GENERIC)
 endif()
 
+# Prebuilt OpenBLAS. OpenBLAS publishes no Linux binaries, so the wheels of the
+# scipy-openblas32 PyPI package are used: they hold a DYNAMIC_ARCH build of
+# OpenBLAS whose symbols carry a "scipy_" prefix.
+# SOFIEBLAS_FETCH_PREBUILT_OPENBLAS=OFF skips it.
+option(SOFIEBLAS_FETCH_PREBUILT_OPENBLAS
+  "Download a prebuilt OpenBLAS when no CPU BLAS library is found" ON)
+set(_sb_wheel_base "https://files.pythonhosted.org/packages")
+set(_sb_wheel_url)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(_sb_proc MATCHES "^(x86_64|amd64)$")
+    set(_sb_wheel_url "${_sb_wheel_base}/75/93/56ce22e41d59a45b885ac67f53425cd012329cb1e4de3285bebc4f8ad4bc/scipy_openblas32-0.3.34.481.3-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl")
+    set(_sb_wheel_sha256 0595f94cd58c1f8a0d90c975621f4587337a003916b1979e834ebdf2cb5d9504)
+  elseif(_sb_proc MATCHES "^(aarch64|arm64)$")
+    set(_sb_wheel_url "${_sb_wheel_base}/04/3e/19a35f6b50552df2fa9464b526d0a4f98f4f9e7789b2adbb813d598640f7/scipy_openblas32-0.3.34.481.3-py3-none-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl")
+    set(_sb_wheel_sha256 e085dddbc5b9aa130f83def515d31c440e69f387a90c7e63b154a5575b4466bc)
+  elseif(_sb_proc MATCHES "^(ppc64le|powerpc64le)$")
+    set(_sb_wheel_url "${_sb_wheel_base}/59/3d/5ebc0960f3ea86886e8b1ada3c12b589090de44db989fa303ea5181a61de/scipy_openblas32-0.3.34.481.3-py3-none-manylinux_2_27_ppc64le.manylinux_2_28_ppc64le.whl")
+    set(_sb_wheel_sha256 f12ea9d388f887c10b921aaedaab861c957152b6b84d98e391a189ca7a256cbe)
+  endif()
+endif()
+
+find_package(Threads REQUIRED)
+if(NOT SOFIEBLAS_CPU_BLAS_LIBS AND SOFIEBLAS_FETCH_PREBUILT_OPENBLAS AND _sb_wheel_url)
+  include(FetchContent)
+  FetchContent_Declare(sofieblas_openblas_wheel
+    URL ${_sb_wheel_url}
+    URL_HASH SHA256=${_sb_wheel_sha256}
+    DOWNLOAD_NO_EXTRACT TRUE)
+  FetchContent_MakeAvailable(sofieblas_openblas_wheel)
+  set(_sb_wheel_dir ${FETCHCONTENT_BASE_DIR}/sofieblas_openblas_wheel-extracted)
+  if(NOT EXISTS ${_sb_wheel_dir}/scipy_openblas32/lib/libscipy_openblas.so)
+    file(GLOB _sb_wheel_file ${sofieblas_openblas_wheel_SOURCE_DIR}/*.whl)
+    file(ARCHIVE_EXTRACT INPUT ${_sb_wheel_file} DESTINATION ${_sb_wheel_dir})
+  endif()
+  set(_sb_prebuilt_lib ${_sb_wheel_dir}/scipy_openblas32/lib/libscipy_openblas.so)
+  if(EXISTS ${_sb_prebuilt_lib})
+    add_library(sofieblas_openblas INTERFACE)
+    target_link_libraries(sofieblas_openblas INTERFACE
+      ${_sb_prebuilt_lib} Threads::Threads m)
+    # the prebuilt symbols are prefixed with scipy_; the code calls cblas_sgemm
+    target_compile_definitions(sofieblas_openblas INTERFACE
+      cblas_sgemm=scipy_cblas_sgemm)
+    set(SOFIEBLAS_CPU_BLAS_LIBS sofieblas_openblas)
+    set(SOFIEBLAS_CPU_BLAS_DEFINE SOFIEBLAS_USE_OPENBLAS)
+    set(SOFIEBLAS_CPU_BLAS_INCLUDE_DIR ${_sb_wheel_dir}/scipy_openblas32/include)
+    set(SOFIEBLAS_CPU_BLAS_FOUND "prebuilt OpenBLAS (scipy-openblas32 wheel)")
+    message(STATUS "sofieBLAS: no CPU BLAS library found, using prebuilt OpenBLAS from the scipy-openblas32 wheel (SOFIEBLAS_FETCH_PREBUILT_OPENBLAS=OFF disables this)")
+  else()
+    message(STATUS "sofieBLAS: prebuilt OpenBLAS download unusable, falling back to a source build")
+  endif()
+endif()
+
 if(NOT SOFIEBLAS_CPU_BLAS_LIBS AND SOFIEBLAS_FETCH_OPENBLAS)
   include(ExternalProject)
-  find_package(Threads REQUIRED)
   set(_openblas_prefix ${CMAKE_BINARY_DIR}/_deps/openblas-install)
   set(_openblas_lib
     ${_openblas_prefix}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}openblas${CMAKE_STATIC_LIBRARY_SUFFIX})

@@ -741,6 +741,9 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
   using Fp8 = typename Blas::Fp8E4M3Type;
   using Bf16 = typename Blas::Bf16Type;
   static_assert(sizeof(Fp8) == 1 && sizeof(Bf16) == 2);
+  // some hip architectures (e.g., gfx942) take FNUZ fp8 data, the others OCP: the reference follows
+  constexpr bool fnuz = Blas::Fp8IsFnuz;
+  std::cout << "  fp8 format: " << (fnuz ? "FNUZ" : "OCP") << "\n";
 
   PlatformAcc platform{};
   auto dev = alpaka::getDevByIdx(platform, 0u);
@@ -897,7 +900,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
       const std::string tag =
           " TN epilogue " + std::to_string(static_cast<int>(epi));
       auto ref = refFp8Gemm(bytesA.data(), bytesB.data(), bias.data(), M, N, K,
-                            alpha, scales[0], scales[1], true, false, epi);
+                            alpha, scales[0], scales[1], true, false, epi, fnuz);
       blas.matmulFp8Fp32('T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA,
                          alpaka::getPtrNative(dB), sB,
                          alpaka::getPtrNative(dBias), alpaka::getPtrNative(dCF),
@@ -916,8 +919,9 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
       for (int i = 0; i < M * N; ++i) {
         uint8_t bits;
         std::memcpy(&bits, static_cast<const void *>(&got8[i]), 1);
-        dec[i] = refFp8ToFloat(bits);
-        want[i] = std::max(-448.f, std::min(448.f, scales[2] * ref[i]));
+        dec[i] = refFp8ToFloat(bits, fnuz);
+        want[i] = std::max(-refFp8Max(fnuz),
+                           std::min(refFp8Max(fnuz), scales[2] * ref[i]));
       }
       checkClose(dec.data(), want.data(), M * N, "matmulFp8Fp8" + tag,
                  1.f / 16.f, std::ldexp(1.f, -10));
@@ -937,7 +941,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
           auto ref = refFp8Gemm(bytesA.data() + b * strideA,
                                 bytesB.data() + b * strideB, bias.data(), M, N,
                                 K, alpha, scales[0], scales[1], true, false,
-                                epi);
+                                epi, fnuz);
           std::copy(ref.begin(), ref.end(), want.begin() + b * M * N);
         }
         blas.matmulFp8Fp32StridedBatched(

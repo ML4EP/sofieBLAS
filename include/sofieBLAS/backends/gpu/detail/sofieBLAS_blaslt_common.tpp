@@ -46,6 +46,8 @@ public:
   using Bf16 = typename Api::Bf16;
   using Fp8E4M3 = typename Api::Fp8E4M3;
   using Fp8E5M2 = typename Api::Fp8E5M2;
+  // whether the fp8 types are the FNUZ or OCP formats
+  static constexpr bool Fp8IsFnuz = Api::Fp8Fnuz;
 
   // the same types under the names shared with the CPU backend
   using Fp8E4M3Type = typename Api::Fp8E4M3;

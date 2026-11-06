@@ -56,6 +56,7 @@ struct CublasLtApi {
   using Bf16 = __nv_bfloat16;
   using Fp8E4M3 = __nv_fp8_e4m3;
   using Fp8E5M2 = __nv_fp8_e5m2;
+  static constexpr bool Fp8Fnuz = false;
 
   static constexpr auto OpN = CUBLAS_OP_N;
   static constexpr auto OpT = CUBLAS_OP_T;
@@ -127,6 +128,10 @@ struct CublasLtApi {
     return cudaMalloc(ptr, size);
   }
   static cudaError_t rtFree(void *ptr) { return cudaFree(ptr); }
+  static constexpr auto RtSuccess = cudaSuccess;
+  static const char *rtErrorString(cudaError_t err) {
+    return cudaGetErrorString(err);
+  }
 };
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_CUBLAS(status)

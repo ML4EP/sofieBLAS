@@ -252,8 +252,13 @@ public:
       Api::ltDestroy(ltHandle);
     if (handle)
       Api::blasDestroy(handle);
-    if (d_workspace)
-      Api::rtFree(d_workspace);
+    // a destructor can neither throw nor recover: report a failed free and go on
+    if (d_workspace) {
+      const auto status = Api::rtFree(d_workspace);
+      if (status != Api::RtSuccess)
+        std::cerr << "sofieBLAS: freeing the workspace threw errors: "
+                  << Api::rtErrorString(status) << "\n";
+    }
   }
 
 protected:
