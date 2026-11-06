@@ -7,6 +7,14 @@
 #include "sofieBLAS/core.hpp"
 #include <alpaka/alpaka.hpp>
 
+
+// fp8 elements are handled by the type's own conversions, in the format of the
+// backend: the caller is responsible for providing data in that format
+template <typename TOut, typename TIn>
+ALPAKA_FN_HOST_ACC TOut convertElement(TIn const &v) {
+  return static_cast<TOut>(v);
+}
+
 enum class Activation { None, Relu, Gelu };
 
 template <Activation A>
@@ -54,7 +62,7 @@ ALPAKA_FN_ACC TOut applyEpilogue(TAcc const &acc, TSum sum, std::size_t i,
                                       : x < -128.f ? -128.f
                                                    : x);
     } else {
-      return static_cast<TOut>(p.scaleD ? x * *p.scaleD : x);
+      return convertElement<TOut>(p.scaleD ? x * *p.scaleD : x);
     }
   }
 }
@@ -64,12 +72,17 @@ struct ConvertKernel {
   ALPAKA_FN_ACC void operator()(TAcc const &acc, const TIn *in, TOut *out,
                                 std::size_t count) const {
     for (auto e : alpaka::uniformElements(acc, count))
-      out[e] = static_cast<TOut>(static_cast<float>(in[e]));
+      out[e] = convertElement<TOut>(in[e]);
   }
 };
 
+// the anonymous union keeps T's (host-only, for fp8) default constructor out of
+// the device code
 template <typename T, std::size_t N> struct alignas(sizeof(T) * N) Packed {
-  T v[N];
+  union {
+    T v[N];
+  };
+  ALPAKA_FN_HOST_ACC Packed() {}
 };
 
 struct EpilogueKernel {
@@ -141,13 +154,13 @@ struct GemmKernel {
         const std::size_t i = i0 + ii, ka = k0 + pa;
         tileA[pa][ii] =
             i < m && ka < k
-                ? static_cast<TSum>(a[transA ? ka + i * lda : i + ka * lda])
+                ? convertElement<TSum>(a[transA ? ka + i * lda : i + ka * lda])
                 : TSum{};
         const std::size_t pb = l % depth, jj = l / depth;
         const std::size_t j = j0 + jj, kb = k0 + pb;
         tileB[pb][jj] =
             j < n && kb < k
-                ? static_cast<TSum>(b[transB ? j + kb * ldb : kb + j * ldb])
+                ? convertElement<TSum>(b[transB ? j + kb * ldb : kb + j * ldb])
                 : TSum{};
       }
       alpaka::syncBlockThreads(acc);

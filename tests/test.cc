@@ -273,20 +273,29 @@ static void checkEqualI8(const int8_t *got, const int8_t *expected, int n,
   checkEqual(g.data(), e.data(), n, name, tol);
 }
 
-// OCP FP8 E4M3 (e4m3fn) bits to float, exact
-static float refFp8ToFloat(uint8_t b) {
+static float refFp8ToFloat(uint8_t b, bool fnuz = false) {
   const int exp = (b >> 3) & 0xF, mant = b & 0x7;
   float x;
-  if (exp == 0xF && mant == 0x7)
+  if (fnuz) {
+    if (b == 0x80)
+      return std::nanf("");
+    x = exp == 0 ? std::ldexp(static_cast<float>(mant), -10)
+                 : std::ldexp(1.f + static_cast<float>(mant) / 8.f, exp - 8);
+  } else if (exp == 0xF && mant == 0x7) {
     x = std::nanf("");
-  else if (exp == 0)
+  } else if (exp == 0) {
     x = std::ldexp(static_cast<float>(mant), -9);
-  else
+  } else {
     x = std::ldexp(1.f + static_cast<float>(mant) / 8.f, exp - 7);
+  }
   return (b & 0x80) ? -x : x;
 }
 
-// fp8 test values: magnitudes between 2^-3 and 2^3 with both signs
+// the largest finite E4M3 value
+static float refFp8Max(bool fnuz = false) { return fnuz ? 240.f : 448.f; }
+
+// fp8 test values: normal numbers (exponent field 4 to 10) with both signs, valid
+// in the OCP and the FNUZ format
 static std::vector<uint8_t> fp8Pattern(std::size_t n, unsigned seed) {
   std::vector<uint8_t> v(n);
   unsigned s = seed;
@@ -312,13 +321,13 @@ static std::vector<float> refFp8Gemm(const uint8_t *A, const uint8_t *B,
                                      const float *bias, int m, int n, int k,
                                      float alpha, float scaleA, float scaleB,
                                      bool transA, bool transB,
-                                     Epilogue epilogue) {
+                                     Epilogue epilogue, bool fnuz = false) {
   std::vector<float> fa(static_cast<std::size_t>(m) * k),
       fb(static_cast<std::size_t>(k) * n), c(static_cast<std::size_t>(m) * n);
   for (std::size_t i = 0; i < fa.size(); ++i)
-    fa[i] = refFp8ToFloat(A[i]);
+    fa[i] = refFp8ToFloat(A[i], fnuz);
   for (std::size_t i = 0; i < fb.size(); ++i)
-    fb[i] = refFp8ToFloat(B[i]);
+    fb[i] = refFp8ToFloat(B[i], fnuz);
   refEpilogue(c.data(), fa.data(), fb.data(), bias, m, n, k,
               alpha * scaleA * scaleB, 0.f, transA, transB, epilogue);
   return c;

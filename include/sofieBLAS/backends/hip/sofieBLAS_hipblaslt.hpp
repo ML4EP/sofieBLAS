@@ -54,8 +54,18 @@ struct HipblasLtApi {
   using Operation = hipblasOperation_t;
   using Epilogue = hipblasLtEpilogue_t;
   using Bf16 = __hip_bfloat16;
+#ifdef SOFIEBLAS_HIP_FP8_FNUZ
+  // some architectures (e.g., gfx942) only supports the FNUZ fp8 formats in device code, 
+  // so a build for it takes FNUZ data from the caller; CMake defines SOFIEBLAS_HIP_FP8_FNUZ when
+  // the HIP targets are such architectures. Every other target takes OCP.
+  using Fp8E4M3 = __hip_fp8_e4m3_fnuz;
+  using Fp8E5M2 = __hip_fp8_e5m2_fnuz;
+  static constexpr bool Fp8Fnuz = true;
+#else
   using Fp8E4M3 = __hip_fp8_e4m3;
   using Fp8E5M2 = __hip_fp8_e5m2;
+  static constexpr bool Fp8Fnuz = false;
+#endif
 
   static constexpr auto OpN = HIPBLAS_OP_N;
   static constexpr auto OpT = HIPBLAS_OP_T;
@@ -71,8 +81,13 @@ struct HipblasLtApi {
   static constexpr auto RealF32 = HIP_R_32F;
   static constexpr auto RealF16 = HIP_R_16F;
   static constexpr auto RealBF16 = HIP_R_16BF;
+#ifdef SOFIEBLAS_HIP_FP8_FNUZ
+  static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3_FNUZ;
+  static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2_FNUZ;
+#else
   static constexpr auto RealF8E4M3 = HIP_R_8F_E4M3;
   static constexpr auto RealF8E5M2 = HIP_R_8F_E5M2;
+#endif
   static constexpr auto RealI8 = HIP_R_8I;
   static constexpr auto RealI32 = HIP_R_32I;
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
@@ -123,6 +138,10 @@ struct HipblasLtApi {
     return hipMalloc(ptr, size);
   }
   static hipError_t rtFree(void *ptr) { return hipFree(ptr); }
+  static constexpr auto RtSuccess = hipSuccess;
+  static const char *rtErrorString(hipError_t err) {
+    return hipGetErrorString(err);
+  }
 };
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
