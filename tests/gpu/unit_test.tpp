@@ -699,7 +699,7 @@ runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
       char transA, transB;
       float alpha;
       Epilogue epilogue;
-      bool rawPointers;
+      bool rawPtrs;
       const char *name;
     };
     for (Case c :
@@ -712,7 +712,7 @@ runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
                      c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue,
                      nullptr, unroundedRef.data());
-      if (c.rawPointers)
+      if (c.rawPtrs)
         blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha,
                         alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
                         alpaka::getPtrNative(dBias), alpaka::getPtrNative(dC),

@@ -11,7 +11,7 @@ template <class Api> class BlasLt : private BlasLtBase<Api> {
   using Base::batchedStore;
   using Base::charToTranspose;
   using Base::createBatchedLayout;
-  using Base::d_workspace;
+  using Base::deviceWorkspace;
   using Base::executeFp8;
   using Base::executeFp8Batched;
   using Base::executeInt8Int8;
@@ -21,7 +21,7 @@ template <class Api> class BlasLt : private BlasLtBase<Api> {
   using Base::executeQuantBatched;
   using Base::getOrComputeAlgo;
   using Base::getOrCreateDesc;
-  using Base::patchPointer;
+  using Base::patchPtr;
   using Base::patchBiasStride;
   using DescEntry = typename Base::DescEntry;
   using Base::getOrCreateLayout;
@@ -168,10 +168,10 @@ public:
   inline void matmul(char transa, char transb, unsigned int m, unsigned int n,
                      unsigned int k, float alpha, TA const &A, TB const &B,
                      float beta, TC &C) {
-    auto *c = alpaka::getPtrNative(C);
+    auto *cPtr = alpaka::getPtrNative(C);
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
                   Api::EpilogueDefault, &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c, nullptr,
+                  alpaka::getPtrNative(B), &beta, cPtr, cPtr, nullptr,
                   layoutKeyA(transa, m, k), layoutKeyB(transb, k, n), {m, n});
   }
 
@@ -293,14 +293,14 @@ public:
                                  long long strideBias = 0) {
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    const auto epi = toApiEpilogue(epilogue);
+    const auto apiEpilogue = toApiEpilogue(epilogue);
     if constexpr (!(requires { Api::DescBiasBatchStride; })) {
-      if (usesBias(epi) && strideBias != 0 && batchCount > 1) {
-        for (int b = 0; b < batchCount; ++b)
-          gemmStridedBatched(transa, transb, m, n, k, alpha, A + b * strideA,
-                             lda, 0, B + b * strideB, ldb, 0, beta,
-                             C + b * strideC, ldc, 0, 1, epilogue,
-                             bias + b * strideBias, 0);
+      if (usesBias(apiEpilogue) && strideBias != 0 && batchCount > 1) {
+        for (int batchIdx = 0; batchIdx < batchCount; ++batchIdx)
+          gemmStridedBatched(transa, transb, m, n, k, alpha, A + batchIdx * strideA,
+                             lda, 0, B + batchIdx * strideB, ldb, 0, beta,
+                             C + batchIdx * strideC, ldc, 0, 1, epilogue,
+                             bias + batchIdx * strideBias, 0);
         return;
       }
     }
@@ -315,22 +315,22 @@ public:
           "sofieBLAS: leading dimension smaller than the number of rows of "
           "the matrix.");
 
-    BatchKey key{(long long)opA,    (long long)opB,    (long long)epi,
+    BatchKey key{(long long)opA,    (long long)opB,    (long long)apiEpilogue,
                  (long long)m,      (long long)n,      (long long)k,
                  (long long)lda,    (long long)ldb,    (long long)ldc,
                  strideA,           strideB,           strideC,
                  (long long)batchCount};
-    auto it = batchedStore.find(key);
-    if (it == batchedStore.end()) {
-      BatchedEntry e{};
-      e.lA = createBatchedLayout(shapeA, lda, strideA, batchCount);
-      e.lB = createBatchedLayout(shapeB, ldb, strideB, batchCount);
-      e.lC = createBatchedLayout({(std::size_t)m, (std::size_t)n}, ldc,
+    auto entryIterator = batchedStore.find(key);
+    if (entryIterator == batchedStore.end()) {
+      BatchedEntry batchedEntry{};
+      batchedEntry.layoutA = createBatchedLayout(shapeA, lda, strideA, batchCount);
+      batchedEntry.layoutB = createBatchedLayout(shapeB, ldb, strideB, batchCount);
+      batchedEntry.layoutC = createBatchedLayout({(std::size_t)m, (std::size_t)n}, ldc,
                                  strideC, batchCount);
-      auto &desc = getOrCreateDesc(opA, opB, epi);
+      auto &descEntry = getOrCreateDesc(opA, opB, apiEpilogue);
       int returned = 0;
-      SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, desc.desc, e.lA, e.lB,
-                                           e.lC, e.lC, preference, 1, &e.h,
+      SOFIEBLAS_CHECK_LT(Api::getHeuristic(ltHandle, descEntry.descriptor, batchedEntry.layoutA, batchedEntry.layoutB,
+                                           batchedEntry.layoutC, batchedEntry.layoutC, preference, 1, &batchedEntry.heuristicResult,
                                            &returned));
       if (returned == 0) {
         std::cerr << "[sofieBLAS] No suitable " << Api::name
@@ -339,18 +339,18 @@ public:
                   << " strideA=" << strideA << " strideB=" << strideB << "\n";
         exit(EXIT_FAILURE);
       }
-      it = batchedStore.emplace(key, e).first;
+      entryIterator = batchedStore.emplace(key, batchedEntry).first;
     }
-    auto &e = it->second;
+    auto &batchedEntry = entryIterator->second;
 
-    auto &desc = getOrCreateDesc(opA, opB, epi);
-    if (usesBias(epi)) {
-      patchPointer(desc, Api::DescBiasPointer, &DescEntry::bias, bias);
-      patchBiasStride(desc, strideBias);
+    auto &descEntry = getOrCreateDesc(opA, opB, apiEpilogue);
+    if (usesBias(apiEpilogue)) {
+      patchPtr(descEntry, Api::DescBiasPtr, &DescEntry::bias, bias);
+      patchBiasStride(descEntry, strideBias);
     }
-    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, desc.desc, &alpha, A, e.lA, B, e.lB,
-                                   &beta, C, e.lC, C, e.lC, &e.h.algo,
-                                   d_workspace, workspaceSize, stream));
+    SOFIEBLAS_CHECK_LT(Api::matmul(ltHandle, descEntry.descriptor, &alpha, A, batchedEntry.layoutA, B, batchedEntry.layoutB,
+                                   &beta, C, batchedEntry.layoutC, C, batchedEntry.layoutC, &batchedEntry.heuristicResult.algo,
+                                   deviceWorkspace, workspaceSize, stream));
   }
 
   inline void gemmStridedBatched(char transa, char transb, int m, int n, int k,
@@ -500,10 +500,10 @@ public:
                              unsigned int n, unsigned int k, float alpha,
                              TA const &A, TB const &B, float beta, TBias &bias,
                              TC &C, Epilogue epilogue = Epilogue::Default) {
-    auto *c = alpaka::getPtrNative(C);
+    auto *cPtr = alpaka::getPtrNative(C);
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
                   toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c,
+                  alpaka::getPtrNative(B), &beta, cPtr, cPtr,
                   alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n}, 0, 0, Api::ComputeF32,
                   Api::RealF32, Api::RealF16, Api::RealF16, Api::RealF16);
@@ -526,10 +526,10 @@ public:
                              unsigned int n, unsigned int k, float alpha,
                              TA const &A, TB const &B, float beta, TBias &bias,
                              TC &C, Epilogue epilogue = Epilogue::Default) {
-    auto *c = alpaka::getPtrNative(C);
+    auto *cPtr = alpaka::getPtrNative(C);
     executeMatmul(charToTranspose(transa), charToTranspose(transb),
                   toApiEpilogue(epilogue), &alpha, alpaka::getPtrNative(A),
-                  alpaka::getPtrNative(B), &beta, c, c,
+                  alpaka::getPtrNative(B), &beta, cPtr, cPtr,
                   alpaka::getPtrNative(bias), layoutKeyA(transa, m, k),
                   layoutKeyB(transb, k, n), {m, n}, 0, 0, Api::ComputeF32,
                   Api::RealF32, Api::RealF16, Api::RealF32, Api::RealF32);
