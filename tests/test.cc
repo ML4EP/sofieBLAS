@@ -139,15 +139,15 @@ static void checkQuantizationOption(TQueue &queue, const std::string &name) {
   }
 }
 
-static void checkClose(const float *got, const float *expected, int n,
+static void checkClose(const float *actual, const float *expected, int n,
                        const std::string &name, float rtol = 1e-4f,
                        float atol = 1e-4f) {
   bool pass = true;
   for (int i = 0; i < n; ++i) {
-    float diff = std::abs(got[i] - expected[i]);
+    float diff = std::abs(actual[i] - expected[i]);
     float thr = atol + rtol * std::abs(expected[i]);
     if (diff > thr) {
-      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
+      std::cerr << "  FAIL [" << name << "] idx=" << i << " actual=" << actual[i]
                 << " expected=" << expected[i] << " diff=" << diff << "\n";
       pass = false;
     }
@@ -189,12 +189,12 @@ static void refMatmulI8(int32_t *C, const int8_t *A, const int8_t *B, int m,
   }
 }
 
-static void checkEqual(const int32_t *got, const int32_t *expected, int n,
+static void checkEqual(const int32_t *actual, const int32_t *expected, int n,
                        const std::string &name, int tol = 0) {
   bool pass = true;
   for (int i = 0; i < n; ++i) {
-    if (std::abs(got[i] - expected[i]) > tol) {
-      std::cerr << "  FAIL [" << name << "] idx=" << i << " got=" << got[i]
+    if (std::abs(actual[i] - expected[i]) > tol) {
+      std::cerr << "  FAIL [" << name << "] idx=" << i << " actual=" << actual[i]
                 << " expected=" << expected[i] << "\n";
       pass = false;
     }
@@ -238,7 +238,8 @@ static void refEpilogue(float *C, const float *A, const float *B,
 static void refMatmulI8Out(int8_t *C, const int8_t *A, const int8_t *B,
                            const float *bias, int m, int n, int k, float alpha,
                            bool transA, bool transB, Epilogue epilogue,
-                           const float *alphaVec = nullptr) {
+                           const float *alphaVec = nullptr,
+                           float *unrounded = nullptr) {
   std::vector<int32_t> acc(static_cast<std::size_t>(m) * n);
   refMatmulI8(acc.data(), A, B, m, n, k, transA, transB);
   for (int j = 0; j < n; ++j)
@@ -253,6 +254,8 @@ static void refMatmulI8Out(int8_t *C, const int8_t *A, const int8_t *B,
       else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
         x *= 0.5f * (1.f + std::tanh(0.7978845608028654f *
                                      (x + 0.044715f * x * x * x)));
+      if (unrounded)
+        unrounded[j * m + i] = x;
       x = std::nearbyint(x);
       C[j * m + i] = static_cast<int8_t>(std::min(127.f, std::max(-128.f, x)));
     }
@@ -267,10 +270,36 @@ static void fillI8Pattern(std::vector<int8_t> &A, std::vector<int8_t> &B) {
     B[i] = static_cast<int8_t>(static_cast<int>(i * 3 % 13) - 6);
 }
 
-static void checkEqualI8(const int8_t *got, const int8_t *expected, int n,
-                         const std::string &name, int tol = 0) {
-  const std::vector<int32_t> g(got, got + n), e(expected, expected + n);
-  checkEqual(g.data(), e.data(), n, name, tol);
+// exact match, except that an element may differ by 1 where the unrounded
+// reference lies within eps of, but not exactly on, a rounding tie (x.5): there
+// a last-ulp difference in the float computation (GELU, fused multiply-add, a
+// non-exact alpha) flips the rounding. An exact tie must match exactly, so a
+// wrong rounding mode is still caught. Used for every int8 output.
+static void checkEqualI8Ties(const int8_t *actual, const int8_t *expected,
+                             const float *unrounded, int n,
+                             const std::string &name, float eps = 1e-3f) {
+  bool pass = true;
+  int flips = 0;
+  for (int i = 0; i < n; ++i) {
+    const int d = std::abs(int(actual[i]) - int(expected[i]));
+    if (d == 0)
+      continue;
+    const float frac = unrounded[i] - std::floor(unrounded[i]);
+    const float distToTie = std::abs(frac - 0.5f);
+    // an exact tie must round like the reference (half to even)
+    if (d == 1 && distToTie > 0.f && distToTie <= eps) {
+      ++flips;
+      continue;
+    }
+    std::cerr << "  FAIL [" << name << "] idx=" << i
+              << " actual=" << int(actual[i]) << " expected=" << int(expected[i])
+              << " unrounded=" << unrounded[i] << "\n";
+    pass = false;
+  }
+  if (pass)
+    std::cout << "  PASS  " << name << " (" << flips << " tie flips)\n";
+  else
+    ++gFailures;
 }
 
 static float refFp8ToFloat(uint8_t b, bool fnuz = false) {

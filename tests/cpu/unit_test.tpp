@@ -82,7 +82,7 @@ static void runCpuTests() {
   checkClose(C, ref.data(), M * N, "cpu::matmul alpha=2.5");
 
   // --- matmul: beta accumulation ---
-  fillSeq(C, M * N, 10.f); // pre-fill C
+  fillSeq(C, M * N, 10.f); // unroundedRef-fill C
   blas.matmul('N', 'N', M, N, K, 1.f, hA, hB, 0.5f, hC);
   {
     std::vector<float> C0(M * N);
@@ -311,14 +311,14 @@ static void runCpuTests() {
         fillSeq(Bb.data(), static_cast<int>(Bb.size()), -2.f, 0.2f);
         std::vector<float> biasv(M * BATCH);
         fillSeq(biasv.data(), static_cast<int>(biasv.size()), -1.5f, 0.4f);
-        std::vector<float> got(M * N * BATCH), want(M * N * BATCH);
-        refBatchedEpilogue(want.data(), denseA.data(), M, sharedA ? 0 : M * K,
+        std::vector<float> actual(M * N * BATCH), expected(M * N * BATCH);
+        refBatchedEpilogue(expected.data(), denseA.data(), M, sharedA ? 0 : M * K,
                            Bb.data(), strideB, biasv.data(), strideBias, M, N,
                            K, BATCH, epi);
         blas.gemmStridedBatched('N', 'N', M, N, K, 1.f, padA.data(), LDA,
-                                strideA, Bb.data(), K, strideB, 0.f, got.data(),
+                                strideA, Bb.data(), K, strideB, 0.f, actual.data(),
                                 M, M * N, BATCH, epi, biasv.data(), strideBias);
-        checkClose(got.data(), want.data(), M * N * BATCH,
+        checkClose(actual.data(), expected.data(), M * N * BATCH,
                    std::string("cpu::gemmStridedBatched epilogue ") +
                        (sharedA ? "A shared " : "B shared ") +
                        std::to_string(static_cast<int>(epi)));
@@ -390,17 +390,19 @@ static void runCpuQuantizedTests() {
                    Case{'N', 'N', 0.5f, Epilogue::Gelu, "gelu"},
                    Case{'N', 'N', 3.f, Epilogue::Default, "saturated"}}) {
       std::vector<int8_t> ref(M * N);
+      std::vector<float> unroundedRef(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
-                     c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue);
+                     c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue,
+                     nullptr, unroundedRef.data());
       blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha, hA, hB, hBias, hC,
                       c.epilogue);
-      checkEqualI8(alpaka::getPtrNative(hC), ref.data(), M * N,
-                   std::string("cpu::int8Matmul int8 out ") + c.name);
+      checkEqualI8Ties(alpaka::getPtrNative(hC), ref.data(), unroundedRef.data(), M * N,
+                       std::string("cpu::int8Matmul int8 out ") + c.name);
       std::vector<int8_t> raw(M * N);
       blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha, A.data(),
                       B.data(), bias.data(), raw.data(), c.epilogue);
-      checkEqualI8(raw.data(), ref.data(), M * N,
-                   std::string("cpu::int8Matmul int8 out raw ") + c.name);
+      checkEqualI8Ties(raw.data(), ref.data(), unroundedRef.data(), M * N,
+                       std::string("cpu::int8Matmul int8 out raw ") + c.name);
     }
 
     // ---- per-row alpha ----
@@ -412,24 +414,27 @@ static void runCpuQuantizedTests() {
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
                          Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       std::vector<int8_t> ref(M * N);
+      std::vector<float> unroundedRef(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 0.f,
-                     true, false, epi, alphaVec.data());
+                     true, false, epi, alphaVec.data(), unroundedRef.data());
       blas.int8MatmulVectorAlpha('T', 'N', M, N, K, hAlpha, hA, hB, hBias, hC,
                                  epi);
-      checkEqualI8(alpaka::getPtrNative(hC), ref.data(), M * N,
-                   "cpu::int8MatmulVectorAlpha epilogue " +
-                       std::to_string(static_cast<int>(epi)));
+      checkEqualI8Ties(alpaka::getPtrNative(hC), ref.data(), unroundedRef.data(), M * N,
+                       "cpu::int8MatmulVectorAlpha epilogue " +
+                           std::to_string(static_cast<int>(epi)));
     }
     {
       // no bias epilogue, null bias, raw pointers
-      std::vector<int8_t> ref(M * N), got(M * N);
+      std::vector<int8_t> ref(M * N), actual(M * N);
+      std::vector<float> unroundedRef(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), nullptr, M, N, K, 0.f,
-                     false, false, Epilogue::Default, alphaVec.data());
+                     false, false, Epilogue::Default, alphaVec.data(),
+                     unroundedRef.data());
       blas.int8MatmulVectorAlpha('N', 'N', M, N, K, alphaVec.data(), A.data(),
-                                 B.data(), nullptr, got.data(),
+                                 B.data(), nullptr, actual.data(),
                                  Epilogue::Default);
-      checkEqualI8(got.data(), ref.data(), M * N,
-                   "cpu::int8MatmulVectorAlpha raw, null bias");
+      checkEqualI8Ties(actual.data(), ref.data(), unroundedRef.data(), M * N,
+                       "cpu::int8MatmulVectorAlpha raw, null bias");
     }
   }
 
@@ -446,26 +451,28 @@ static void runCpuQuantizedTests() {
       fillSeq(bias.data(), M, -6.f, 2.f);
       const std::string tag = sharedA ? " A shared" : " B shared";
 
-      std::vector<int32_t> got32(M * N * BATCH), ref32(M * N * BATCH);
-      std::vector<int8_t> got8(M * N * BATCH), ref8(M * N * BATCH);
+      std::vector<int32_t> actual32(M * N * BATCH), ref32(M * N * BATCH);
+      std::vector<int8_t> actual8(M * N * BATCH), ref8(M * N * BATCH);
+      std::vector<float> unroundedRef8(M * N * BATCH);
       for (int b = 0; b < BATCH; ++b) {
         refMatmulI8(ref32.data() + b * M * N, A.data() + b * strideA,
                     B.data() + b * strideB, M, N, K, true, false);
         refMatmulI8Out(ref8.data() + b * M * N, A.data() + b * strideA,
                        B.data() + b * strideB, bias.data(), M, N, K, 0.5f,
-                       true, false, Epilogue::ReluBias);
+                       true, false, Epilogue::ReluBias, nullptr,
+                       unroundedRef8.data() + b * M * N);
       }
       blas.int8MatmulStridedBatched('T', 'N', M, N, K, A.data(), strideA,
-                                    B.data(), strideB, got32.data(), M * N,
+                                    B.data(), strideB, actual32.data(), M * N,
                                     BATCH);
-      checkEqual(got32.data(), ref32.data(), M * N * BATCH,
+      checkEqual(actual32.data(), ref32.data(), M * N * BATCH,
                  "cpu::int8MatmulStridedBatched int32" + tag);
       blas.int8MatmulStridedBatched('T', 'N', M, N, K, 0.5f, A.data(),
                                     strideA, B.data(), strideB, bias.data(),
-                                    got8.data(), M * N, BATCH,
+                                    actual8.data(), M * N, BATCH,
                                     Epilogue::ReluBias);
-      checkEqualI8(got8.data(), ref8.data(), M * N * BATCH,
-                   "cpu::int8MatmulStridedBatched int8 relu bias" + tag);
+      checkEqualI8Ties(actual8.data(), ref8.data(), unroundedRef8.data(), M * N * BATCH,
+                       "cpu::int8MatmulStridedBatched int8 relu bias" + tag);
     }
   }
 
@@ -532,44 +539,44 @@ static void runCpuQuantizedTests() {
       for (bool tA : {true, false}) {
         auto ref = refFp8Gemm(bytesA.data(), bytesB.data(), bias.data(), M, N,
                               K, alpha, scaleA, scaleB, tA, false, epi);
-        std::vector<float> got(M * N);
+        std::vector<float> actual(M * N);
         blas.matmulFp8Fp32(tA ? 'T' : 'N', 'N', M, N, K, alpha, A.data(),
                            &scaleA, B.data(), &scaleB, biasBf16.data(),
-                           got.data(), epi);
-        checkClose(got.data(), ref.data(), M * N,
+                           actual.data(), epi);
+        checkClose(actual.data(), ref.data(), M * N,
                    std::string("cpu::matmulFp8Fp32 ") + (tA ? "TN" : "NN") +
                        tag,
                    1e-5f, 1e-4f);
 
         // fp8 C: scaleD * result, rounded to E4M3: within half a step
-        std::vector<Fp8> got8(M * N);
+        std::vector<Fp8> actual8(M * N);
         blas.matmulFp8Fp8(tA ? 'T' : 'N', 'N', M, N, K, alpha, A.data(),
                           &scaleA, B.data(), &scaleB, biasBf16.data(),
-                          got8.data(), &scaleD, epi);
-        std::vector<float> dec(M * N), want(M * N);
+                          actual8.data(), &scaleD, epi);
+        std::vector<float> dec(M * N), expected(M * N);
         for (int i = 0; i < M * N; ++i) {
-          dec[i] = refFp8ToFloat(got8[i].bits);
-          want[i] = std::max(-448.f, std::min(448.f, scaleD * ref[i]));
+          dec[i] = refFp8ToFloat(actual8[i].bits);
+          expected[i] = std::max(-448.f, std::min(448.f, scaleD * ref[i]));
         }
-        checkClose(dec.data(), want.data(), M * N,
+        checkClose(dec.data(), expected.data(), M * N,
                    std::string("cpu::matmulFp8Fp8 ") + (tA ? "TN" : "NN") + tag,
                    1.f / 16.f, std::ldexp(1.f, -10));
       }
     }
 
     // strided-batched, A shared, bias shared
-    std::vector<float> want(M * N * BATCH), got(M * N * BATCH);
+    std::vector<float> expected(M * N * BATCH), actual(M * N * BATCH);
     for (int b = 0; b < BATCH; ++b) {
       auto ref = refFp8Gemm(bytesA.data(), bytesB.data() + b * K * N,
                             bias.data(), M, N, K, alpha, scaleA, scaleB, true,
                             false, Epilogue::ReluBias);
-      std::copy(ref.begin(), ref.end(), want.begin() + b * M * N);
+      std::copy(ref.begin(), ref.end(), expected.begin() + b * M * N);
     }
     blas.matmulFp8Fp32StridedBatched('T', 'N', M, N, K, alpha, A.data(),
                                      &scaleA, 0, B.data(), &scaleB, K * N,
-                                     biasBf16.data(), got.data(), M * N, BATCH,
+                                     biasBf16.data(), actual.data(), M * N, BATCH,
                                      Epilogue::ReluBias);
-    checkClose(got.data(), want.data(), M * N * BATCH,
+    checkClose(actual.data(), expected.data(), M * N * BATCH,
                "cpu::matmulFp8Fp32StridedBatched A shared, relu bias", 1e-5f,
                1e-4f);
   }
@@ -758,15 +765,15 @@ static void runCpuFp16Tests() {
     fillSeq(A.data(), M * K, -2.f, 0.25f);
     fillSeq(B.data(), K * N, -3.f, 0.25f);
     const auto hA = toHalf(A), hB = toHalf(B);
-    std::vector<float> ref(M * N, 0.f), got(M * N, 0.f);
+    std::vector<float> ref(M * N, 0.f), actual(M * N, 0.f);
     refEpilogue(ref.data(), A.data(), B.data(), nullptr, M, N, K, 1.f, 0.f,
                 false, false, Epilogue::Relu);
     blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
-                        static_cast<const float *>(nullptr), got.data(),
+                        static_cast<const float *>(nullptr), actual.data(),
                         Epilogue::Relu);
-    checkClose(got.data(), ref.data(), M * N, "cpu::matmulFp16Fp32 null bias",
+    checkClose(actual.data(), ref.data(), M * N, "cpu::matmulFp16Fp32 null bias",
                1e-6f, 1e-6f);
-    auto cH = toHalf(got);
+    auto cH = toHalf(actual);
     blas.matmulFp16Fp16('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
                         static_cast<const Fp16 *>(nullptr), cH.data(),
                         Epilogue::Relu);
@@ -775,7 +782,7 @@ static void runCpuFp16Tests() {
     bool threw = false;
     try {
       blas.matmulFp16Fp32('N', 'N', M, N, K, 1.f, hA.data(), hB.data(), 0.f,
-                          static_cast<const float *>(nullptr), got.data(),
+                          static_cast<const float *>(nullptr), actual.data(),
                           Epilogue::Bias);
     } catch (const std::invalid_argument &) {
       threw = true;

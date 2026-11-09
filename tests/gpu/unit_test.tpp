@@ -708,8 +708,10 @@ runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
           Case{'N', 'N', 3.f, Epilogue::Default, false, "saturated"}}) {
       const std::string name = std::string("int8Matmul int8 out ") + c.name;
       std::vector<int8_t> ref(M * N);
+      std::vector<float> unroundedRef(M * N);
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
-                     c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue);
+                     c.alpha, c.transA == 'T', c.transB == 'T', c.epilogue,
+                     nullptr, unroundedRef.data());
       if (c.rawPointers)
         blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha,
                         alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
@@ -718,10 +720,8 @@ runGpuLowPrecisionTests(BlasOptions options = {.quantization = true}) {
       else
         blas.int8Matmul(c.transA, c.transB, M, N, K, c.alpha, dA, dB, dBias, dC,
                         c.epilogue);
-      const auto got = download(dC, M * N);
-      const std::vector<int32_t> got32(got.begin(), got.end());
-      const std::vector<int32_t> ref32(ref.begin(), ref.end());
-      checkEqual(got32.data(), ref32.data(), M * N, name);
+      checkEqualI8Ties(download(dC, M * N).data(), ref.data(), unroundedRef.data(),
+                       M * N, name);
     }
   }
 }
@@ -791,24 +791,25 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
       const std::string tag =
           " TN epilogue " + std::to_string(static_cast<int>(epi));
       std::vector<int8_t> ref(M * N);
-      // vendor GELU can round a .5 tie the other way
-      const int tol =
-          epi == Epilogue::GeluBias || epi == Epilogue::Gelu ? 1 : 0;
+      std::vector<float> unroundedRef(M * N);
+      auto check = [&](const int8_t *actual, const std::string &name) {
+        checkEqualI8Ties(actual, ref.data(), unroundedRef.data(), M * N, name);
+      };
 
       const std::string nameS = "int8Matmul int8 out alpha=0.5 (ties)" + tag;
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K,
-                     0.5f, true, false, epi);
+                     0.5f, true, false, epi, nullptr, unroundedRef.data());
       blas.int8Matmul('T', 'N', M, N, K, 0.5f, alpaka::getPtrNative(dA),
                       alpaka::getPtrNative(dB), alpaka::getPtrNative(dBias),
                       alpaka::getPtrNative(dC), epi);
-      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameS, tol);
+      check(download(dC, M * N).data(), nameS);
 
       const std::string nameV = "int8MatmulVectorAlpha" + tag;
       refMatmulI8Out(ref.data(), A.data(), B.data(), bias.data(), M, N, K, 0.f,
-                     true, false, epi, alphaVec.data());
+                     true, false, epi, alphaVec.data(), unroundedRef.data());
       blas.int8MatmulVectorAlpha('T', 'N', M, N, K, dAlpha, dA, dB, dBias, dC,
                                  epi);
-      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N, nameV, tol);
+      check(download(dC, M * N).data(), nameV);
       blas.int8MatmulVectorAlpha(
           'T', 'N', M, N, K, alpaka::getPtrNative(dAlpha),
           alpaka::getPtrNative(dA), alpaka::getPtrNative(dB),
@@ -817,8 +818,7 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
               ? nullptr
               : alpaka::getPtrNative(dBias),
           alpaka::getPtrNative(dC), epi);
-      checkEqualI8(download(dC, M * N).data(), ref.data(), M * N,
-                   nameV + " raw", tol);
+      check(download(dC, M * N).data(), nameV + " raw");
     }
   }
 
@@ -853,19 +853,19 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
     for (Epilogue epi : {Epilogue::Default, Epilogue::Bias, Epilogue::ReluBias,
                          Epilogue::GeluBias, Epilogue::Relu, Epilogue::Gelu}) {
       std::vector<int8_t> ref8(M * N * BATCH);
+      std::vector<float> unroundedRef8(M * N * BATCH);
       for (int b = 0; b < BATCH; ++b)
         refMatmulI8Out(ref8.data() + b * M * N, A.data() + b * strideA,
                        B.data() + b * strideB, bias.data(), M, N, K, 0.5f,
-                       true, false, epi);
+                       true, false, epi, nullptr, unroundedRef8.data() + b * M * N);
       const std::string name8 = "int8MatmulStridedBatched int8 epilogue " +
                                 std::to_string(static_cast<int>(epi)) + tag;
       blas.int8MatmulStridedBatched(
           'T', 'N', M, N, K, 0.5f, alpaka::getPtrNative(dA), strideA,
           alpaka::getPtrNative(dB), strideB, alpaka::getPtrNative(dBias),
           alpaka::getPtrNative(dC8), M * N, BATCH, epi);
-      checkEqualI8(download(dC8, M * N * BATCH).data(), ref8.data(),
-                   M * N * BATCH, name8,
-                   epi == Epilogue::GeluBias || epi == Epilogue::Gelu ? 1 : 0);
+      checkEqualI8Ties(download(dC8, M * N * BATCH).data(), ref8.data(),
+                       unroundedRef8.data(), M * N * BATCH, name8);
     }
   }
 
@@ -914,16 +914,16 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
                         alpaka::getPtrNative(dB), sB,
                         alpaka::getPtrNative(dBias), alpaka::getPtrNative(dC8),
                         sD, epi);
-      const auto got8 = download(dC8, M * N);
-      std::vector<float> dec(M * N), want(M * N);
+      const auto actual8 = download(dC8, M * N);
+      std::vector<float> dec(M * N), expected(M * N);
       for (int i = 0; i < M * N; ++i) {
         uint8_t bits;
-        std::memcpy(&bits, static_cast<const void *>(&got8[i]), 1);
+        std::memcpy(&bits, static_cast<const void *>(&actual8[i]), 1);
         dec[i] = refFp8ToFloat(bits, fnuz);
-        want[i] = std::max(-refFp8Max(fnuz),
+        expected[i] = std::max(-refFp8Max(fnuz),
                            std::min(refFp8Max(fnuz), scales[2] * ref[i]));
       }
-      checkClose(dec.data(), want.data(), M * N, "matmulFp8Fp8" + tag,
+      checkClose(dec.data(), expected.data(), M * N, "matmulFp8Fp8" + tag,
                  1.f / 16.f, std::ldexp(1.f, -10));
     }
 
@@ -936,19 +936,19 @@ static void runGpuQuantizedTests(BlasOptions options = {.quantization = true}) {
             std::string("matmulFp8Fp32StridedBatched") +
             (sharedA ? " A shared" : " B shared") + " epilogue " +
             std::to_string(static_cast<int>(epi));
-        std::vector<float> want(M * N * BATCH);
+        std::vector<float> expected(M * N * BATCH);
         for (int b = 0; b < BATCH; ++b) {
           auto ref = refFp8Gemm(bytesA.data() + b * strideA,
                                 bytesB.data() + b * strideB, bias.data(), M, N,
                                 K, alpha, scales[0], scales[1], true, false,
                                 epi, fnuz);
-          std::copy(ref.begin(), ref.end(), want.begin() + b * M * N);
+          std::copy(ref.begin(), ref.end(), expected.begin() + b * M * N);
         }
         blas.matmulFp8Fp32StridedBatched(
             'T', 'N', M, N, K, alpha, alpaka::getPtrNative(dA), sA, strideA,
             alpaka::getPtrNative(dB), sB, strideB, alpaka::getPtrNative(dBias),
             alpaka::getPtrNative(dCF), M * N, BATCH, epi);
-        checkClose(download(dCF, M * N * BATCH).data(), want.data(),
+        checkClose(download(dCF, M * N * BATCH).data(), expected.data(),
                    M * N * BATCH, name, 1e-3f, 1e-2f);
       }
   }

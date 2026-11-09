@@ -993,7 +993,7 @@ protected:
 
     std::vector<std::int8_t> a8(a.begin(), a.end()), b8(b.begin(), b.end());
     const std::vector<std::int32_t> poison32(m * n, -77);
-    std::vector<std::int32_t> got32(m * n);
+    std::vector<std::int32_t> actual32(m * n);
     auto dA = upload(a8);
     auto dB = upload(b8);
     auto dC32 = upload(poison32);
@@ -1006,9 +1006,9 @@ protected:
           shapeA, shapeB, shapeC, 0, 0, Api::ComputeI32, Api::RealI32,
           Api::RealI8, Api::RealI32, Api::RealF32, false, false);
       if (ran)
-        download(dC32, got32);
+        download(dC32, actual32);
       caps.int8Int32 =
-          ran && std::equal(got32.begin(), got32.end(), sums.begin())
+          ran && std::equal(actual32.begin(), actual32.end(), sums.begin())
               ? GemmMode::Vendor
               : GemmMode::Native;
     }
@@ -1019,7 +1019,7 @@ protected:
     for (std::size_t i = 0; i < b.size(); ++i)
       bh[i] = static_cast<__half>(static_cast<float>(b[i]));
     const std::vector<float> poisonF(m * n, -77.f);
-    std::vector<float> gotF(m * n);
+    std::vector<float> actualF(m * n);
     auto dAh = upload(ah);
     auto dBh = upload(bh);
     auto dCF = upload(poisonF);
@@ -1033,16 +1033,16 @@ protected:
           Api::RealF32, Api::RealF32, false, false);
       bool ok = ran;
       if (ran) {
-        download(dCF, gotF);
+        download(dCF, actualF);
         for (std::size_t e = 0; e < m * n && ok; ++e)
-          ok = std::abs(gotF[e] - static_cast<float>(sums[e])) <=
+          ok = std::abs(actualF[e] - static_cast<float>(sums[e])) <=
                1e-3f * (1.f + std::abs(static_cast<float>(sums[e])));
       }
       caps.fp16Fp32 = ok ? GemmMode::Vendor : GemmMode::Native;
     }
 
     const std::vector<std::int8_t> poison8(m * n, std::int8_t{-77});
-    std::vector<std::int8_t> got8(m * n);
+    std::vector<std::int8_t> actual8(m * n);
     auto dAlpha = upload(alphas);
     auto dBias = upload(bias);
     auto dC = upload(poison8);
@@ -1065,7 +1065,7 @@ protected:
                 Api::ComputeI32, Api::RealF32, Api::RealI8, Api::RealI8,
                 Api::RealF32, vector, false))
           continue;
-        download(dC, got8);
+        download(dC, actual8);
         const int tolerance =
             epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu ? 1
                                                                          : 0;
@@ -1075,9 +1075,9 @@ protected:
           const float x = std::nearbyint(applyEpilogue(
               (vector ? alphas[i] : alpha) * static_cast<float>(sums[e]),
               bias[i], epilogue));
-          const int want =
+          const int expected =
               static_cast<int>(std::min(127.f, std::max(-128.f, x)));
-          ok = std::abs(static_cast<int>(got8[e]) - want) <= tolerance;
+          ok = std::abs(static_cast<int>(actual8[e]) - expected) <= tolerance;
         }
         if (ok)
           table[epilogue] = GemmMode::Vendor;
@@ -1115,13 +1115,13 @@ protected:
               Api::ComputeF32, Api::RealF32, Api::RealF8E4M3, Api::RealF32,
               Api::RealBF16, scaleA, scaleB, nullptr, false, false))
         continue;
-      download(dCF, gotF);
+      download(dCF, actualF);
       bool ok = true;
       for (std::size_t e = 0; e < m * n && ok; ++e) {
-        const float want = applyEpilogue(alpha * scales[0] * scales[1] *
+        const float expected = applyEpilogue(alpha * scales[0] * scales[1] *
                                              static_cast<float>(sums[e]),
                                          bias[e % m], epilogue);
-        ok = std::abs(gotF[e] - want) <= 1e-3f * (1.f + std::abs(want));
+        ok = std::abs(actualF[e] - expected) <= 1e-3f * (1.f + std::abs(expected));
       }
       if (!ok)
         continue;
