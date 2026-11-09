@@ -326,7 +326,8 @@ static float refFp8ToFloat(uint8_t b, bool fnuz = false) {
 // the largest finite E4M3 value
 static float refFp8Max(bool fnuz = false) { return fnuz ? 240.f : 448.f; }
 
-// fp8 test values: normal numbers (exponent field 4 to 10) with both signs,
+// fp8 test values: normal numbers (exponent field 6 to 8) with both signs,
+// kept narrow so the K-sums fit the ~13-bit accumulator of the fp8 tensor cores
 // valid in the OCP and the FNUZ format
 static std::vector<uint8_t> fp8Pattern(std::size_t n, unsigned seed) {
   std::vector<uint8_t> v(n);
@@ -334,7 +335,7 @@ static std::vector<uint8_t> fp8Pattern(std::size_t n, unsigned seed) {
   for (auto &b : v) {
     s = s * 1103515245u + 12345u;
     const unsigned r = s >> 16;
-    const unsigned exp = 4 + r % 7, mant = (r >> 3) & 0x7, sign = (r >> 6) & 1;
+    const unsigned exp = 6 + r % 3, mant = (r >> 3) & 0x7, sign = (r >> 6) & 1;
     b = static_cast<uint8_t>((sign << 7) | (exp << 3) | mant);
   }
   return v;
