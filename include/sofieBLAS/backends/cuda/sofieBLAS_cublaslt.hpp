@@ -23,18 +23,19 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
-#define CHECK_CUDA(err)                                                        \
-  if ((err) != cudaSuccess) {                                                  \
-    std::cerr << "CUDA error: " << cudaGetErrorString(err) << " at line "      \
-              << __LINE__ << "\n";                                             \
+#define CHECK_CUDA(errorCode)                                                  \
+  if ((errorCode) != cudaSuccess) {                                            \
+    std::cerr << "CUDA error: " << cudaGetErrorString(errorCode)               \
+              << " at line " << __LINE__ << "\n";                              \
     exit(EXIT_FAILURE);                                                        \
   }
 
 #define CHECK_CUBLAS(status)                                                   \
   do {                                                                         \
-    cublasStatus_t _s = (status);                                              \
-    if (_s != CUBLAS_STATUS_SUCCESS) {                                         \
-      std::cerr << "cuBLAS error " << _s << " at line " << __LINE__ << "\n";   \
+    cublasStatus_t blasStatus = (status);                                      \
+    if (blasStatus != CUBLAS_STATUS_SUCCESS) {                                 \
+      std::cerr << "cuBLAS error " << blasStatus << " at line " << __LINE__    \
+                << "\n";                                                       \
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
@@ -79,18 +80,15 @@ struct CublasLtApi {
   static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
-  static constexpr auto DescBiasPointer = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr auto DescBiasPtr = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
   static constexpr auto DescBiasDataType = CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
-  static constexpr auto DescAScalePointer =
-      CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
-  static constexpr auto DescBScalePointer =
-      CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
-  static constexpr auto DescDScalePointer =
-      CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
-  static constexpr auto DescPointerMode = CUBLASLT_MATMUL_DESC_POINTER_MODE;
-  static constexpr auto PointerModeAlphaDeviceVectorBetaZero =
+  static constexpr auto DescAScalePtr = CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePtr = CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePtr = CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  static constexpr auto DescPtrMode = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PtrModeAlphaDeviceVectorBetaZero =
       CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_ZERO;
-  static constexpr auto PointerModeAlphaDeviceVectorBetaHost =
+  static constexpr auto PtrModeAlphaDeviceVectorBetaHost =
       CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
   // a device vector of alpha values, one per row of D
   static constexpr auto DescBiasBatchStride =
@@ -124,18 +122,18 @@ struct CublasLtApi {
   static constexpr auto sgemmStridedBatched = cublasSgemmStridedBatched;
 
   // cudaMalloc has a templated C++ overload, so a pointer to it is ambiguous
-  static cudaError_t rtMalloc(void **ptr, std::size_t size) {
-    return cudaMalloc(ptr, size);
+  static cudaError_t rtMalloc(void **pointer, std::size_t sizeInBytes) {
+    return cudaMalloc(pointer, sizeInBytes);
   }
-  static cudaError_t rtFree(void *ptr) { return cudaFree(ptr); }
+  static cudaError_t rtFree(void *pointer) { return cudaFree(pointer); }
   static constexpr auto RtSuccess = cudaSuccess;
-  static const char *rtErrorString(cudaError_t err) {
-    return cudaGetErrorString(err);
+  static const char *rtErrorString(cudaError_t errorCode) {
+    return cudaGetErrorString(errorCode);
   }
 };
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_CUBLAS(status)
-#define SOFIEBLAS_CHECK_RT(err) CHECK_CUDA(err)
+#define SOFIEBLAS_CHECK_RT(errorCode) CHECK_CUDA(errorCode)
 
 #include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 

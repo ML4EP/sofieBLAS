@@ -97,11 +97,11 @@ public:
                 static_cast<int>(n), static_cast<int>(k), alpha,
                 alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
                 0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
-    float *c = alpaka::getPtrNative(C);
-    const float *b = alpaka::getPtrNative(bias);
+    float *cPtr = alpaka::getPtrNative(C);
+    const float *biasPtr = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        c[j * m + i] += beta * b[j * m + i] + b[i];
+        cPtr[j * m + i] += beta * biasPtr[j * m + i] + biasPtr[i];
   }
 
   template <typename T, typename TIdx>
@@ -124,11 +124,11 @@ public:
                 static_cast<int>(n), static_cast<int>(k), alpha,
                 alpaka::getPtrNative(A), lda, alpaka::getPtrNative(B), ldb,
                 0.0f, alpaka::getPtrNative(C), static_cast<int>(m));
-    float *c = alpaka::getPtrNative(C);
-    const float *b = alpaka::getPtrNative(bias);
+    float *cPtr = alpaka::getPtrNative(C);
+    const float *biasPtr = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        c[j * m + i] += beta * b[j * m + i] + b[i];
+        cPtr[j * m + i] += beta * biasPtr[j * m + i] + biasPtr[i];
   }
 
   // C = relu(alpha * op(A) * op(B) + beta * bias + bias_vec)
@@ -141,9 +141,9 @@ public:
                        alpaka::BufCpu<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCpu<T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
-    float *c = alpaka::getPtrNative(C);
+    float *cPtr = alpaka::getPtrNative(C);
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] = c[i] > 0.0f ? c[i] : 0.0f;
+      cPtr[i] = cPtr[i] > 0.0f ? cPtr[i] : 0.0f;
   }
 
   template <typename T, typename TIdx>
@@ -158,9 +158,9 @@ public:
       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
-    float *c = alpaka::getPtrNative(C);
+    float *cPtr = alpaka::getPtrNative(C);
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] = c[i] > 0.0f ? c[i] : 0.0f;
+      cPtr[i] = cPtr[i] > 0.0f ? cPtr[i] : 0.0f;
   }
 
   // C = gelu(alpha * op(A) * op(B) + beta * bias + bias_vec)
@@ -174,9 +174,9 @@ public:
                        alpaka::BufCpu<T, alpaka::DimInt<1u>, TIdx> &bias,
                        alpaka::BufCpu<T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
-    float *c = alpaka::getPtrNative(C);
+    float *cPtr = alpaka::getPtrNative(C);
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] = sofieblas::cpu::geluTanh(c[i]);
+      cPtr[i] = sofieblas::cpu::geluTanh(cPtr[i]);
   }
 
   template <typename T, typename TIdx>
@@ -191,9 +191,9 @@ public:
       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &bias,
       alpaka::ViewPlainPtr<alpaka::DevCpu, T, alpaka::DimInt<1u>, TIdx> &C) {
     gemm(transa, transb, m, n, k, alpha, A, B, beta, bias, C);
-    float *c = alpaka::getPtrNative(C);
+    float *cPtr = alpaka::getPtrNative(C);
     for (unsigned int i = 0; i < m * n; ++i)
-      c[i] = sofieblas::cpu::geluTanh(c[i]);
+      cPtr[i] = sofieblas::cpu::geluTanh(cPtr[i]);
   }
 
   template <typename TA, typename TB, typename TC>
@@ -291,10 +291,10 @@ public:
     requireQuantization();
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    for (int b = 0; b < batchCount; ++b)
-      sofieblas::cpu::dispatchInt8Matmul(transa, transb, m, n, k,
-                                         A + b * strideA, B + b * strideB,
-                                         C + b * strideC);
+    for (int batchIdx = 0; batchIdx < batchCount; ++batchIdx)
+      sofieblas::cpu::dispatchInt8Matmul(
+          transa, transb, m, n, k, A + batchIdx * strideA,
+          B + batchIdx * strideB, C + batchIdx * strideC);
   }
 
   template <typename TA, typename TB, typename TBias, typename TC,
@@ -323,10 +323,10 @@ public:
     requireQuantization();
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    for (int b = 0; b < batchCount; ++b)
-      sofieblas::cpu::executeInt8Out(transa, transb, m, n, k, &alpha, false,
-                                     A + b * strideA, B + b * strideB, bias,
-                                     C + b * strideC, epilogue);
+    for (int batchIdx = 0; batchIdx < batchCount; ++batchIdx)
+      sofieblas::cpu::executeInt8Out(
+          transa, transb, m, n, k, &alpha, false, A + batchIdx * strideA,
+          B + batchIdx * strideB, bias, C + batchIdx * strideC, epilogue);
   }
 
   // fp8 GEMMs, as on the GPU backends: A and B in FP8 E4M3, each with its own
@@ -384,12 +384,12 @@ public:
                            const Bf16 *bias, Fp8E4M3 *C, const float *scaleD,
                            Epilogue epilogue = Epilogue::Default) {
     requireQuantization();
-    std::vector<float> out(static_cast<std::size_t>(m) * n);
+    std::vector<float> floatResult(static_cast<std::size_t>(m) * n);
     sofieblas::cpu::executeFp8(transa, transb, m, n, k, alpha, A, scaleA, B,
-                               scaleB, bias, out.data(), epilogue);
-    const float sD = *scaleD;
-    for (std::size_t i = 0; i < out.size(); ++i)
-      C[i] = sofieblas::cpu::floatToFp8E4M3(sD * out[i]);
+                               scaleB, bias, floatResult.data(), epilogue);
+    const float scaleDVal = *scaleD;
+    for (std::size_t i = 0; i < floatResult.size(); ++i)
+      C[i] = sofieblas::cpu::floatToFp8E4M3(scaleDVal * floatResult[i]);
   }
 
   // fp16 GEMMs, as on the GPU backends: A and B in FP16,
@@ -436,21 +436,21 @@ public:
                              const Fp16 *bias, Fp16 *C,
                              Epilogue epilogue = Epilogue::Default) {
     const std::size_t size = static_cast<std::size_t>(m) * n;
-    std::vector<float> out(size), biasF;
+    std::vector<float> floatResult(size), biasFloat;
     // C is read only for the beta term
     if (beta != 0.f)
       for (std::size_t i = 0; i < size; ++i)
-        out[i] = sofieblas::cpu::fp16ToFloat(C[i]);
+        floatResult[i] = sofieblas::cpu::fp16ToFloat(C[i]);
     if (bias) {
-      biasF.resize(m);
+      biasFloat.resize(m);
       for (unsigned int i = 0; i < m; ++i)
-        biasF[i] = sofieblas::cpu::fp16ToFloat(bias[i]);
+        biasFloat[i] = sofieblas::cpu::fp16ToFloat(bias[i]);
     }
     sofieblas::cpu::executeFp16(transa, transb, m, n, k, alpha, A, B, beta,
-                                bias ? biasF.data() : nullptr, out.data(),
-                                epilogue);
+                                bias ? biasFloat.data() : nullptr,
+                                floatResult.data(), epilogue);
     for (std::size_t i = 0; i < size; ++i)
-      C[i] = sofieblas::cpu::floatToFp16(out[i]);
+      C[i] = sofieblas::cpu::floatToFp16(floatResult[i]);
   }
 
   // Strided-batched matmulFp8Fp32: X_b = X + b * strideX (strides in elements,
@@ -482,10 +482,11 @@ public:
     requireQuantization();
     if (batchCount < 1)
       throw std::invalid_argument("sofieBLAS: batchCount must be positive.");
-    for (int b = 0; b < batchCount; ++b)
+    for (int batchIdx = 0; batchIdx < batchCount; ++batchIdx)
       sofieblas::cpu::executeFp8(transa, transb, m, n, k, alpha,
-                                 A + b * strideA, scaleA, B + b * strideB,
-                                 scaleB, bias, C + b * strideC, epilogue);
+                                 A + batchIdx * strideA, scaleA,
+                                 B + batchIdx * strideB, scaleB, bias,
+                                 C + batchIdx * strideC, epilogue);
   }
 
   // Raw-pointer overloads: accept T const*/T* from any BufXxx or ViewPlainPtr
@@ -603,23 +604,24 @@ public:
       throw std::invalid_argument(
           "sofieBLAS: leading dimension smaller than the number of rows of "
           "the matrix.");
-    for (int b = 0; b < batchCount; ++b) {
-      float *c = C + b * strideC;
+    for (int batchIdx = 0; batchIdx < batchCount; ++batchIdx) {
+      float *cPtr = C + batchIdx * strideC;
       cblas_sgemm(CblasColMajor, sofieblas::cpu::charToTranspose(transa),
                   sofieblas::cpu::charToTranspose(transb), m, n, k, alpha,
-                  A + b * strideA, lda, B + b * strideB, ldb, beta, c, ldc);
+                  A + batchIdx * strideA, lda, B + batchIdx * strideB, ldb,
+                  beta, cPtr, ldc);
       if (epilogue == Epilogue::Default)
         continue;
-      const float *bv = bias + b * strideBias;
+      const float *batchBias = bias + batchIdx * strideBias;
       for (int j = 0; j < n; ++j)
         for (int i = 0; i < m; ++i) {
-          float &x = c[j * ldc + i];
+          float &value = cPtr[j * ldc + i];
           if (sofieblas::cpu::epilogueUsesBias(epilogue))
-            x += bv[i];
+            value += batchBias[i];
           if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
-            x = x > 0.0f ? x : 0.0f;
+            value = value > 0.0f ? value : 0.0f;
           else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
-            x = sofieblas::cpu::geluTanh(x);
+            value = sofieblas::cpu::geluTanh(value);
         }
     }
   }

@@ -23,18 +23,19 @@
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 
-#define CHECK_HIP(err)                                                         \
-  if ((err) != hipSuccess) {                                                   \
-    std::cerr << "HIP error: " << hipGetErrorString(err) << " at line "        \
+#define CHECK_HIP(errorCode)                                                   \
+  if ((errorCode) != hipSuccess) {                                             \
+    std::cerr << "HIP error: " << hipGetErrorString(errorCode) << " at line "  \
               << __LINE__ << "\n";                                             \
     exit(EXIT_FAILURE);                                                        \
   }
 
 #define CHECK_HIPBLAS(status)                                                  \
   do {                                                                         \
-    hipblasStatus_t _s = (status);                                             \
-    if (_s != HIPBLAS_STATUS_SUCCESS) {                                        \
-      std::cerr << "hipBLAS error " << _s << " at line " << __LINE__ << "\n";  \
+    hipblasStatus_t blasStatus = (status);                                     \
+    if (blasStatus != HIPBLAS_STATUS_SUCCESS) {                                \
+      std::cerr << "hipBLAS error " << blasStatus << " at line " << __LINE__   \
+                << "\n";                                                       \
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
@@ -55,9 +56,10 @@ struct HipblasLtApi {
   using Epilogue = hipblasLtEpilogue_t;
   using Bf16 = __hip_bfloat16;
 #ifdef SOFIEBLAS_HIP_FP8_FNUZ
-  // some architectures (e.g., gfx942) only supports the FNUZ fp8 formats in device code, 
-  // so a build for it takes FNUZ data from the caller; CMake defines SOFIEBLAS_HIP_FP8_FNUZ when
-  // the HIP targets are such architectures. Every other target takes OCP.
+  // some architectures (e.g., gfx942) only supports the FNUZ fp8 formats in
+  // device code, so a build for it takes FNUZ data from the caller; CMake
+  // defines SOFIEBLAS_HIP_FP8_FNUZ when the HIP targets are such architectures.
+  // Every other target takes OCP.
   using Fp8E4M3 = __hip_fp8_e4m3_fnuz;
   using Fp8E5M2 = __hip_fp8_e5m2_fnuz;
   static constexpr bool Fp8Fnuz = true;
@@ -93,16 +95,13 @@ struct HipblasLtApi {
   static constexpr auto DescTransA = HIPBLASLT_MATMUL_DESC_TRANSA;
   static constexpr auto DescTransB = HIPBLASLT_MATMUL_DESC_TRANSB;
   static constexpr auto DescEpilogue = HIPBLASLT_MATMUL_DESC_EPILOGUE;
-  static constexpr auto DescBiasPointer = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr auto DescBiasPtr = HIPBLASLT_MATMUL_DESC_BIAS_POINTER;
   static constexpr auto DescBiasDataType = HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
-  static constexpr auto DescAScalePointer =
-      HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
-  static constexpr auto DescBScalePointer =
-      HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
-  static constexpr auto DescDScalePointer =
-      HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
-  static constexpr auto DescPointerMode = HIPBLASLT_MATMUL_DESC_POINTER_MODE;
-  static constexpr auto PointerModeAlphaDeviceVectorBetaHost =
+  static constexpr auto DescAScalePtr = HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePtr = HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePtr = HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  static constexpr auto DescPtrMode = HIPBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PtrModeAlphaDeviceVectorBetaHost =
       HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
   static constexpr auto LayoutBatchCount = HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
   static constexpr auto LayoutStridedBatchOffset =
@@ -134,18 +133,18 @@ struct HipblasLtApi {
   static constexpr auto sgemmStridedBatched = hipblasSgemmStridedBatched;
 
   // hipMalloc has a templated C++ overload, so a pointer to it is ambiguous
-  static hipError_t rtMalloc(void **ptr, std::size_t size) {
-    return hipMalloc(ptr, size);
+  static hipError_t rtMalloc(void **pointer, std::size_t sizeInBytes) {
+    return hipMalloc(pointer, sizeInBytes);
   }
-  static hipError_t rtFree(void *ptr) { return hipFree(ptr); }
+  static hipError_t rtFree(void *pointer) { return hipFree(pointer); }
   static constexpr auto RtSuccess = hipSuccess;
-  static const char *rtErrorString(hipError_t err) {
-    return hipGetErrorString(err);
+  static const char *rtErrorString(hipError_t errorCode) {
+    return hipGetErrorString(errorCode);
   }
 };
 
 #define SOFIEBLAS_CHECK_LT(status) CHECK_HIPBLAS(status)
-#define SOFIEBLAS_CHECK_RT(err) CHECK_HIP(err)
+#define SOFIEBLAS_CHECK_RT(errorCode) CHECK_HIP(errorCode)
 
 #include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
 

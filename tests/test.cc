@@ -71,9 +71,9 @@ static void refGemmGelu(float *C, const float *A, const float *B,
                         const float *bias, int m, int n, int k, float alpha,
                         float beta, bool transA, bool transB) {
   refGemm(C, A, B, bias, m, n, k, alpha, beta, transA, transB);
-  constexpr float kSqrt2OverPi = 0.7978845608028654f;
+  constexpr float kSqrt2_OverPi = 0.7978845608028654f;
   for (int i = 0; i < m * n; ++i)
-    C[i] *= 0.5f * (1.f + std::tanh(kSqrt2OverPi *
+    C[i] *= 0.5f * (1.f + std::tanh(kSqrt2_OverPi *
                                     (C[i] + 0.044715f * C[i] * C[i] * C[i])));
 }
 
@@ -97,7 +97,7 @@ static void refBatchedEpilogue(float *C, const float *A, int lda,
                                long long strideB, const float *bias,
                                long long strideBias, int m, int n, int k,
                                int batch, Epilogue epilogue) {
-  constexpr float kSqrt2OverPi = 0.7978845608028654f;
+  constexpr float kSqrt2_OverPi = 0.7978845608028654f;
   for (int b = 0; b < batch; ++b)
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < m; ++i) {
@@ -110,7 +110,7 @@ static void refBatchedEpilogue(float *C, const float *A, int lda,
         if (epilogue == Epilogue::ReluBias || epilogue == Epilogue::Relu)
           sum = sum > 0.f ? sum : 0.f;
         else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
-          sum *= 0.5f * (1.f + std::tanh(kSqrt2OverPi *
+          sum *= 0.5f * (1.f + std::tanh(kSqrt2_OverPi *
                                          (sum + 0.044715f * sum * sum * sum)));
         C[b * (long long)m * n + j * m + i] = sum;
       }
@@ -147,8 +147,9 @@ static void checkClose(const float *actual, const float *expected, int n,
     float diff = std::abs(actual[i] - expected[i]);
     float thr = atol + rtol * std::abs(expected[i]);
     if (diff > thr) {
-      std::cerr << "  FAIL [" << name << "] idx=" << i << " actual=" << actual[i]
-                << " expected=" << expected[i] << " diff=" << diff << "\n";
+      std::cerr << "  FAIL [" << name << "] idx=" << i
+                << " actual=" << actual[i] << " expected=" << expected[i]
+                << " diff=" << diff << "\n";
       pass = false;
     }
   }
@@ -194,8 +195,9 @@ static void checkEqual(const int32_t *actual, const int32_t *expected, int n,
   bool pass = true;
   for (int i = 0; i < n; ++i) {
     if (std::abs(actual[i] - expected[i]) > tol) {
-      std::cerr << "  FAIL [" << name << "] idx=" << i << " actual=" << actual[i]
-                << " expected=" << expected[i] << "\n";
+      std::cerr << "  FAIL [" << name << "] idx=" << i
+                << " actual=" << actual[i] << " expected=" << expected[i]
+                << "\n";
       pass = false;
     }
   }
@@ -217,7 +219,7 @@ static void refEpilogue(float *C, const float *A, const float *B,
                         float beta, bool transA, bool transB,
                         Epilogue epilogue) {
   refMatmul(C, A, B, m, n, k, alpha, beta, transA, transB);
-  constexpr float kSqrt2OverPi = 0.7978845608028654f;
+  constexpr float kSqrt2_OverPi = 0.7978845608028654f;
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < m; ++i) {
       float &x = C[j * m + i];
@@ -228,7 +230,7 @@ static void refEpilogue(float *C, const float *A, const float *B,
         x = x > 0.f ? x : 0.f;
       else if (epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu)
         x *= 0.5f *
-             (1.f + std::tanh(kSqrt2OverPi * (x + 0.044715f * x * x * x)));
+             (1.f + std::tanh(kSqrt2_OverPi * (x + 0.044715f * x * x * x)));
     }
 }
 
@@ -292,7 +294,8 @@ static void checkEqualI8Ties(const int8_t *actual, const int8_t *expected,
       continue;
     }
     std::cerr << "  FAIL [" << name << "] idx=" << i
-              << " actual=" << int(actual[i]) << " expected=" << int(expected[i])
+              << " actual=" << int(actual[i])
+              << " expected=" << int(expected[i])
               << " unrounded=" << unrounded[i] << "\n";
     pass = false;
   }
@@ -323,8 +326,8 @@ static float refFp8ToFloat(uint8_t b, bool fnuz = false) {
 // the largest finite E4M3 value
 static float refFp8Max(bool fnuz = false) { return fnuz ? 240.f : 448.f; }
 
-// fp8 test values: normal numbers (exponent field 4 to 10) with both signs, valid
-// in the OCP and the FNUZ format
+// fp8 test values: normal numbers (exponent field 4 to 10) with both signs,
+// valid in the OCP and the FNUZ format
 static std::vector<uint8_t> fp8Pattern(std::size_t n, unsigned seed) {
   std::vector<uint8_t> v(n);
   unsigned s = seed;
