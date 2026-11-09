@@ -441,7 +441,8 @@ protected:
         Api::getHeuristic(ltHandle, descEntry.descriptor, newEntry.layoutA,
                           newEntry.layoutB, newEntry.layoutC, newEntry.layoutD,
                           preference, 1, &newEntry.heuristicResult, &returned);
-    SOFIEBLAS_CHECK_LT(status);
+    if (required || status != Api::StatusNotSupported)
+      SOFIEBLAS_CHECK_LT(status);
     newEntry.found = returned != 0;
     auto *storedEntry = &quantBatchedStore.emplace(key, newEntry).first->second;
     if (newEntry.found)
@@ -629,7 +630,8 @@ protected:
     const auto status = Api::getHeuristic(
         ltHandle, descEntry.descriptor, layoutA, layoutB, layoutC, layoutD,
         preference, 1, &heuristicResult, &returnedResults);
-    SOFIEBLAS_CHECK_LT(status);
+    if (required || status != Api::StatusNotSupported)
+      SOFIEBLAS_CHECK_LT(status);
     if (returnedResults == 0 && required)
       utils::reportAlgoMissing<Api>(transA, transB, epilogue, shapeA, shapeB);
     CacheEntry entry{heuristicResult, {}, returnedResults != 0};
@@ -968,13 +970,14 @@ protected:
                              "constructed with {.quantization = true}");
   }
 
-  void enableQuantization(bool forceNative) {
+  void enableQuantization(bool forceNative, bool forceVendor) {
+    if (forceNative && forceVendor)
+      throw std::invalid_argument("sofieBLAS: BlasOptions::forceNative and "
+                                  "forceVendor are mutually exclusive");
     quantization = true;
     if (forceNative)
       return;
-    if constexpr (Api::ProbeCapabilities) {
-      detectCapabilities();
-    } else {
+    if (forceVendor) {
       detectedCapabilities.int8Int32 = GemmMode::Vendor;
       detectedCapabilities.fp16Fp32 = GemmMode::Vendor;
       for (auto *table :
@@ -987,7 +990,9 @@ protected:
       if constexpr (!(requires { Api::PtrModeAlphaDeviceVectorBetaHost; }))
         detectedCapabilities.int8Int8VectorAlpha.fill(
             GemmMode::Vendor_withExtendedEpilogue);
+      return;
     }
+    detectCapabilities();
   }
 
   void detectCapabilities() {
@@ -1122,21 +1127,26 @@ protected:
                 Api::RealF32, vector, false))
           continue;
         download(deviceC8, actual8);
-        const int tolerance =
-            epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu ? 1
-                                                                         : 0;
+        const bool geluEpilogue =
+            epilogue == Epilogue::GeluBias || epilogue == Epilogue::Gelu;
         bool matchesReference = true;
         for (std::size_t element = 0; element < m * n && matchesReference;
              ++element) {
           const std::size_t i = element % m;
-          const float roundedExpected = std::nearbyint(applyEpilogue(
+          const float unrounded = applyEpilogue(
               (vector ? alphas[i] : alpha) *
                   static_cast<float>(hostReferenceProduct[element]),
-              bias[i], epilogue));
+              bias[i], epilogue);
           const int expected = static_cast<int>(
-              std::min(127.f, std::max(-128.f, roundedExpected)));
-          matchesReference = std::abs(static_cast<int>(actual8[element]) -
-                                      expected) <= tolerance;
+              std::min(127.f, std::max(-128.f, std::nearbyint(unrounded))));
+          const int difference =
+              std::abs(static_cast<int>(actual8[element]) - expected);
+          const float distanceToTie =
+              std::abs(unrounded - std::floor(unrounded) - 0.5f);
+          matchesReference =
+              difference == 0 ||
+              (geluEpilogue && difference == 1 && distanceToTie > 0.f &&
+               distanceToTie <= 1e-3f);
         }
         if (matchesReference)
           table[epilogue] = GemmMode::Vendor;

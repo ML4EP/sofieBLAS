@@ -109,7 +109,6 @@ struct HipblasLtApi {
   static constexpr auto PrefMaxWorkspace =
       HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
   static constexpr auto StatusSuccess = HIPBLAS_STATUS_SUCCESS;
-  static constexpr bool ProbeCapabilities = true;
   static constexpr auto StatusNotSupported = HIPBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "hipBLASLt";
 

@@ -69,7 +69,7 @@ public:
   BlasLt(typename Api::Queue &queue, BlasOptions options)
       : Base(queue, options.cacheLimit) {
     if (options.quantization)
-      Base::enableQuantization(options.forceNative);
+      Base::enableQuantization(options.forceNative, options.forceVendor);
   }
 
   // Registers a call site's construction-time shape: creates the three matrix

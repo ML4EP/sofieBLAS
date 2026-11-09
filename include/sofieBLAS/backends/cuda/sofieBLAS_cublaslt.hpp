@@ -99,7 +99,6 @@ struct CublasLtApi {
   static constexpr auto PrefMaxWorkspace =
       CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
   static constexpr auto StatusSuccess = CUBLAS_STATUS_SUCCESS;
-  static constexpr bool ProbeCapabilities = false;
   static constexpr auto StatusNotSupported = CUBLAS_STATUS_NOT_SUPPORTED;
   static constexpr const char *name = "cuBLASLt";
 
