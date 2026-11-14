@@ -378,7 +378,7 @@ protected:
   static void destroyQuantBatched(QuantBatchedEntry &entry) {
     if (entry.layoutD && entry.layoutD != entry.layoutC)
       Api::layoutDestroy(entry.layoutD);
-    for (auto layout : {entry.layoutA, entry.layoutB, entry.layoutC})
+    for (auto layout : std::array{entry.layoutA, entry.layoutB, entry.layoutC})
       if (layout)
         Api::layoutDestroy(layout);
   }
