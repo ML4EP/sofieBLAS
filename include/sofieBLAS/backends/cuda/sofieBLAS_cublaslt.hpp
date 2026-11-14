@@ -1,0 +1,150 @@
+#pragma once
+
+#ifdef ALPAKA_ACC_GPU_CUDA_ENABLED
+
+#include <array>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <iostream>
+#include <list>
+#include <map>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
+
+#include "sofieBLAS/core.hpp"
+#include <alpaka/alpaka.hpp>
+#include <cublasLt.h>
+#include <cublas_v2.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
+
+#define CHECK_CUDA(errorCode)                                                  \
+  if ((errorCode) != cudaSuccess) {                                            \
+    std::cerr << "CUDA error: " << cudaGetErrorString(errorCode)               \
+              << " at line " << __LINE__ << "\n";                              \
+    exit(EXIT_FAILURE);                                                        \
+  }
+
+#define CHECK_CUBLAS(status)                                                   \
+  do {                                                                         \
+    cublasStatus_t blasStatus = (status);                                      \
+    if (blasStatus != CUBLAS_STATUS_SUCCESS) {                                 \
+      std::cerr << "cuBLAS error " << blasStatus << " at line " << __LINE__    \
+                << "\n";                                                       \
+      exit(EXIT_FAILURE);                                                      \
+    }                                                                          \
+  } while (0)
+
+// The cuBLASLt forwarding of the shared BlasLt implementation in
+// backends/gpu/detail
+struct CublasLtApi {
+  using Queue = alpaka::QueueCudaRtNonBlocking;
+  using Tag = alpaka::TagGpuCudaRt;
+  using Handle = cublasLtHandle_t;
+  using BlasHandle = cublasHandle_t;
+  using Preference = cublasLtMatmulPreference_t;
+  using Stream = cudaStream_t;
+  using Layout = cublasLtMatrixLayout_t;
+  using MatmulDesc = cublasLtMatmulDesc_t;
+  using HeuristicResult = cublasLtMatmulHeuristicResult_t;
+  using Operation = cublasOperation_t;
+  using Epilogue = cublasLtEpilogue_t;
+  using Bf16 = __nv_bfloat16;
+  using Fp8E4M3 = __nv_fp8_e4m3;
+  using Fp8E5M2 = __nv_fp8_e5m2;
+  static constexpr bool Fp8Fnuz = false;
+
+  static constexpr auto OpN = CUBLAS_OP_N;
+  static constexpr auto OpT = CUBLAS_OP_T;
+  static constexpr auto OpC = CUBLAS_OP_C;
+  static constexpr auto EpilogueDefault = CUBLASLT_EPILOGUE_DEFAULT;
+  static constexpr auto EpilogueBias = CUBLASLT_EPILOGUE_BIAS;
+  static constexpr auto EpilogueReluBias = CUBLASLT_EPILOGUE_RELU_BIAS;
+  static constexpr auto EpilogueGeluBias = CUBLASLT_EPILOGUE_GELU_BIAS;
+  static constexpr auto EpilogueRelu = CUBLASLT_EPILOGUE_RELU;
+  static constexpr auto EpilogueGelu = CUBLASLT_EPILOGUE_GELU;
+  static constexpr auto ComputeF32 = CUBLAS_COMPUTE_32F;
+  static constexpr auto ComputeI32 = CUBLAS_COMPUTE_32I;
+  static constexpr auto RealF32 = CUDA_R_32F;
+  static constexpr auto RealF16 = CUDA_R_16F;
+  static constexpr auto RealBF16 = CUDA_R_16BF;
+  static constexpr auto RealF8E4M3 = CUDA_R_8F_E4M3;
+  static constexpr auto RealF8E5M2 = CUDA_R_8F_E5M2;
+  static constexpr auto RealI8 = CUDA_R_8I;
+  static constexpr auto RealI32 = CUDA_R_32I;
+  static constexpr auto DescTransA = CUBLASLT_MATMUL_DESC_TRANSA;
+  static constexpr auto DescTransB = CUBLASLT_MATMUL_DESC_TRANSB;
+  static constexpr auto DescEpilogue = CUBLASLT_MATMUL_DESC_EPILOGUE;
+  static constexpr auto DescBiasPtr = CUBLASLT_MATMUL_DESC_BIAS_POINTER;
+  static constexpr auto DescBiasDataType = CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE;
+  static constexpr auto DescAScalePtr = CUBLASLT_MATMUL_DESC_A_SCALE_POINTER;
+  static constexpr auto DescBScalePtr = CUBLASLT_MATMUL_DESC_B_SCALE_POINTER;
+  static constexpr auto DescDScalePtr = CUBLASLT_MATMUL_DESC_D_SCALE_POINTER;
+  static constexpr auto DescPtrMode = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+  static constexpr auto PtrModeAlphaDeviceVectorBetaZero =
+      CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_ZERO;
+  static constexpr auto PtrModeAlphaDeviceVectorBetaHost =
+      CUBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
+  // a device vector of alpha values, one per row of D
+  static constexpr auto DescBiasBatchStride =
+      CUBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE;
+  static constexpr auto LayoutBatchCount = CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT;
+  static constexpr auto LayoutStridedBatchOffset =
+      CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET;
+  static constexpr auto PrefMaxWorkspace =
+      CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES;
+  static constexpr auto StatusSuccess = CUBLAS_STATUS_SUCCESS;
+  static constexpr auto StatusNotSupported = CUBLAS_STATUS_NOT_SUPPORTED;
+  static constexpr const char *name = "cuBLASLt";
+
+  static constexpr auto ltCreate = cublasLtCreate;
+  static constexpr auto ltDestroy = cublasLtDestroy;
+  static constexpr auto blasCreate = cublasCreate;
+  static constexpr auto blasDestroy = cublasDestroy;
+  static constexpr auto blasSetStream = cublasSetStream;
+  static constexpr auto prefCreate = cublasLtMatmulPreferenceCreate;
+  static constexpr auto prefDestroy = cublasLtMatmulPreferenceDestroy;
+  static constexpr auto prefSetAttribute = cublasLtMatmulPreferenceSetAttribute;
+  static constexpr auto layoutCreate = cublasLtMatrixLayoutCreate;
+  static constexpr auto layoutDestroy = cublasLtMatrixLayoutDestroy;
+  static constexpr auto layoutSetAttribute = cublasLtMatrixLayoutSetAttribute;
+  static constexpr auto descCreate = cublasLtMatmulDescCreate;
+  static constexpr auto descDestroy = cublasLtMatmulDescDestroy;
+  static constexpr auto descSetAttribute = cublasLtMatmulDescSetAttribute;
+  static constexpr auto getHeuristic = cublasLtMatmulAlgoGetHeuristic;
+  static constexpr auto matmul = cublasLtMatmul;
+  static constexpr auto sgemmStridedBatched = cublasSgemmStridedBatched;
+
+  // cudaMalloc has a templated C++ overload, so a pointer to it is ambiguous
+  static cudaError_t rtMalloc(void **pointer, std::size_t sizeInBytes) {
+    return cudaMalloc(pointer, sizeInBytes);
+  }
+  static cudaError_t rtFree(void *pointer) { return cudaFree(pointer); }
+  static constexpr auto RtSuccess = cudaSuccess;
+  static const char *rtErrorString(cudaError_t errorCode) {
+    return cudaGetErrorString(errorCode);
+  }
+};
+
+#define SOFIEBLAS_CHECK_LT(status) CHECK_CUBLAS(status)
+#define SOFIEBLAS_CHECK_RT(errorCode) CHECK_CUDA(errorCode)
+
+#include "sofieBLAS/backends/gpu/detail/sofieBLAS_blaslt_common.tpp"
+
+using BlasCuda = BlasLt<CublasLtApi>;
+
+namespace traits {
+
+template <> class sofieBLAS<alpaka::TagGpuCudaRt> {
+public:
+  using Impl = BlasCuda;
+};
+
+} // namespace traits
+
+#endif // ALPAKA_ACC_GPU_CUDA_ENABLED
