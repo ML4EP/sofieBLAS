@@ -108,6 +108,32 @@ static void runCpuTests() {
   refGemm(ref.data(), A, B, bias, M, N, K, 1.f, 1.f, false, false);
   checkClose(C, ref.data(), M * N, "cpu::gemm NN beta=1");
 
+  // --- gemm/gemmrelu with a bias vector of length M and beta=0, as SOFIE's
+  //     generated code calls them: only bias[0..M) may be read. The entries
+  //     after it are NaN, so reading the beta*bias[j*M+i] term would turn the
+  //     result into NaN even though beta is 0. ---
+  {
+    std::vector<float> biasVec(M * N, std::numeric_limits<float>::quiet_NaN());
+    for (int i = 0; i < M; ++i)
+      biasVec[i] = 0.5f * (i + 1);
+    std::vector<float> expected(M * N, 0.f);
+    refMatmul(expected.data(), A, B, M, N, K, 1.f, 0.f, false, false);
+    for (int j = 0; j < N; ++j)
+      for (int i = 0; i < M; ++i)
+        expected[j * M + i] += biasVec[i];
+
+    fillVal(C, M * N, 0.f);
+    blas.gemm('N', 'N', M, N, K, 1.f, static_cast<const float *>(A),
+              static_cast<const float *>(B), 0.f, biasVec.data(), C);
+    checkClose(C, expected.data(), M * N, "cpu::gemm bias vector beta=0");
+
+    fillVal(C, M * N, 0.f);
+    blas.gemmrelu('N', 'N', M, N, K, 1.f, static_cast<const float *>(A),
+                  static_cast<const float *>(B), 0.f, biasVec.data(), C);
+    checkClose(C, expected.data(), M * N,
+               "cpu::gemmrelu bias vector beta=0"); // all positive here
+  }
+
   // --- gemm TN ---
   {
     auto hAt = alpaka::allocBuf<float, Idx>(dev, static_cast<Idx>(K * M));
@@ -323,6 +349,29 @@ static void runCpuTests() {
                        (sharedA ? "A shared " : "B shared ") +
                        std::to_string(static_cast<int>(epi)));
       }
+  }
+
+  // --- batched multiply without epilogue (the overload generated code calls):
+  //     per-batch A, B shared between the batches (stride 0), beta accumulation ---
+  {
+    constexpr int BATCH = 3;
+    std::vector<float> Ab(M * K * BATCH), Bs(K * N);
+    fillSeq(Ab.data(), static_cast<int>(Ab.size()), -1.f, 0.25f);
+    fillSeq(Bs.data(), static_cast<int>(Bs.size()), 0.5f, -0.1f);
+    std::vector<float> actual(M * N * BATCH), expected(M * N * BATCH);
+    fillSeq(actual.data(), static_cast<int>(actual.size()), 1.f, 0.5f);
+    for (int b = 0; b < BATCH; ++b) {
+      std::vector<float> prod(M * N, 0.f);
+      refMatmul(prod.data(), Ab.data() + b * M * K, Bs.data(), M, N, K, 1.f,
+                0.f, false, false);
+      for (int i = 0; i < M * N; ++i)
+        expected[b * M * N + i] = 2.f * prod[i] + 0.5f * actual[b * M * N + i];
+    }
+    blas.gemmStridedBatched('N', 'N', M, N, K, 2.f, Ab.data(), M, M * K,
+                            Bs.data(), K, 0, 0.5f, actual.data(), M, M * N,
+                            BATCH);
+    checkClose(actual.data(), expected.data(), M * N * BATCH,
+               "cpu::gemmStridedBatched no epilogue, beta=0.5");
   }
 
   // --- edge: identity-like (square, known result) ---

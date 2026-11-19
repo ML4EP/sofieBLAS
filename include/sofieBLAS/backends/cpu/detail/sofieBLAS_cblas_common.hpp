@@ -37,6 +37,15 @@ public:
   BlasCpu(alpaka::QueueCpuBlocking &queue [[maybe_unused]], BlasOptions options)
       : quantization{options.quantization} {}
 
+  // The GPU backends use this to create the matrix layouts and choose the
+  // algorithm of a call site ahead of time. CBLAS needs no such setup, so it is
+  // a no-op that lets the same generated code compile for CPU accelerators.
+  void addOperationConfig(std::size_t /*m*/, std::size_t /*n*/,
+                          std::size_t /*k*/, std::size_t /*lda*/,
+                          std::size_t /*ldb*/, std::size_t /*ldc*/,
+                          char /*transa*/, char /*transb*/,
+                          Epilogue /*epilogue*/) {}
+
   bool quantizationEnabled() const { return quantization; }
 
   // C = alpha * op(A) * op(B) + beta * C  (no bias, leading dims inferred)
@@ -101,7 +110,7 @@ public:
     const float *biasPtr = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        cPtr[j * m + i] += beta * biasPtr[j * m + i] + biasPtr[i];
+        cPtr[j * m + i] += (beta != 0.0f ? beta * biasPtr[j * m + i] : 0.0f) + biasPtr[i];
   }
 
   template <typename T, typename TIdx>
@@ -128,7 +137,7 @@ public:
     const float *biasPtr = alpaka::getPtrNative(bias);
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        cPtr[j * m + i] += beta * biasPtr[j * m + i] + biasPtr[i];
+        cPtr[j * m + i] += (beta != 0.0f ? beta * biasPtr[j * m + i] : 0.0f) + biasPtr[i];
   }
 
   // C = relu(alpha * op(A) * op(B) + beta * bias + bias_vec)
@@ -519,7 +528,7 @@ public:
                 0.0f, C, static_cast<int>(m));
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        C[j * m + i] += beta * bias[j * m + i] + bias[i];
+        C[j * m + i] += (beta != 0.0f ? beta * bias[j * m + i] : 0.0f) + bias[i];
   }
 
   template <typename T>
@@ -562,7 +571,7 @@ public:
     matmul(transa, transb, m, n, k, alpha, A, lda, B, ldb, 0.0f, C);
     for (unsigned int j = 0; j < n; ++j)
       for (unsigned int i = 0; i < m; ++i)
-        C[j * m + i] += beta * bias[j * m + i] + bias[i];
+        C[j * m + i] += (beta != 0.0f ? beta * bias[j * m + i] : 0.0f) + bias[i];
   }
 
   template <typename T>
@@ -624,6 +633,19 @@ public:
             value = sofieblas::cpu::geluTanh(value);
         }
     }
+  }
+
+  // Batched multiply without epilogue, C_b = alpha * op(A_b) * op(B_b) +
+  // beta * C_b, as in the GPU backends (which call cublas/hipblas
+  // sgemmStridedBatched for it).
+  inline void gemmStridedBatched(char transa, char transb, int m, int n, int k,
+                                 float alpha, const float *A, int lda,
+                                 long long strideA, const float *B, int ldb,
+                                 long long strideB, float beta, float *C,
+                                 int ldc, long long strideC, int batchCount) {
+    gemmStridedBatched(transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb,
+                       strideB, beta, C, ldc, strideC, batchCount,
+                       Epilogue::Default, nullptr);
   }
 
 private:

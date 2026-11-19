@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -146,7 +147,7 @@ static void checkClose(const float *actual, const float *expected, int n,
   for (int i = 0; i < n; ++i) {
     float diff = std::abs(actual[i] - expected[i]);
     float thr = atol + rtol * std::abs(expected[i]);
-    if (diff > thr) {
+    if (!(diff <= thr)) { // also fails on NaN
       std::cerr << "  FAIL [" << name << "] idx=" << i
                 << " actual=" << actual[i] << " expected=" << expected[i]
                 << " diff=" << diff << "\n";
